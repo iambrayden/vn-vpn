@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Log in · {{ brand }}{% endblock %}
+{% block content %}
+<div class="auth card">
+  <h1>Log in</h1>
+  <form method="post" action="/login">
+    <label>Email <input type="email" name="email" required autofocus></label>
+    <label>Password <input type="password" name="password" required></label>
+    <button class="btn primary wide">Log in</button>
+  </form>
+  {% if open_signup %}<p class="muted">New here? <a href="/signup">Create an account</a></p>{% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}My VPN · {{ brand }}{% endblock %}
+{% block content %}
+<section class="head">
+  <div>
+    <h1>Choose a server</h1>
+    <p class="muted">Install the free <a href="https://www.wireguard.com/install/" target="_blank" rel="noopener">WireGuard app</a>,
+      then import a config (or scan the QR code on your phone). Import several to switch between locations with one tap.</p>
+  </div>
+  <div class="actions">
+    {% if user.status == 'active' and nodes %}<a class="btn primary" href="/portal/configs.zip">Download all configs</a>{% endif %}
+  </div>
+</section>
+
+{% if user.status != 'active' %}
+  <div class="flash error">Your account is suspended. Contact support to restore access.</div>
+{% elif not nodes %}
+  <div class="card empty">No servers are available yet. Check back soon.</div>
+{% else %}
+<div class="grid">
+  {% for n in nodes %}
+  <div class="card server">
+    <div class="server-head">
+      <div>
+        <div class="loc">{{ n.location or '—' }}</div>
+        <h2>{{ n.name }}</h2>
+      </div>
+      <span class="pill {{ 'on' if n.online else 'off' }}">{{ 'Online' if n.online else 'Offline' }}</span>
+    </div>
+    {% if n.connected %}<p class="connected">● You're connected here · ↓{{ n.tx|bytes }} ↑{{ n.rx|bytes }}</p>{% endif %}
+    <div class="row">
+      <a class="btn primary" href="/portal/config/{{ n.id }}.conf">Download config</a>
+      <button class="btn" onclick="document.getElementById('qr{{ n.id }}').toggleAttribute('hidden')">QR code</button>
+    </div>
+    <div id="qr{{ n.id }}" class="qr" hidden><img loading="lazy" src="/portal/qr/{{ n.id }}.svg" alt="QR code for {{ n.name }}"></div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<section class="card details">
+  <h3>Your connection</h3>
+  <p>Tunnel IP: <code>{{ vpn_ip }}</code> · Status: <b>{{ user.status }}</b></p>
+  <form method="post" action="/portal/rotate-key" onsubmit="return confirm('Old configs will stop working. Continue?')">
+    <button class="btn danger small">Reset my keys</button>
+    <span class="muted">Use this if a device with your config was lost.</span>
+  </form>
+</section>
+{% endblock %}

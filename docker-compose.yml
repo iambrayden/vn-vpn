@@ -1,0 +1,27 @@
+# Coolify: create a new resource -> "Docker Compose" from this repo, set the env vars below,
+# and attach your domain to the "panel" service (port 8000).
+services:
+  panel:
+    build: .
+    restart: unless-stopped
+    environment:
+      - SERVICE_FQDN_PANEL_8000
+      - PUBLIC_URL=${SERVICE_FQDN_PANEL}
+      - SECRET_KEY=${SERVICE_PASSWORD_64_SECRET}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:?set ADMIN_EMAIL}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD}
+      - BRAND_NAME=${BRAND_NAME:-VN-VPN}
+      - OPEN_SIGNUP=${OPEN_SIGNUP:-true}
+      - PROVISION_API_KEY=${PROVISION_API_KEY:-}
+      - VPN_SUBNET=${VPN_SUBNET:-10.66.0.0/16}
+      - CLIENT_DNS=${CLIENT_DNS:-1.1.1.1, 1.0.0.1}
+    volumes:
+      - vnvpn-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  vnvpn-data:

@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Admin · {{ brand }}{% endblock %}
+{% block content %}
+{% set online = nodes|selectattr('online')|list %}
+<section class="stats">
+  <div class="card stat"><div class="n">{{ online|length }}/{{ nodes|length }}</div><div class="muted">Servers online</div></div>
+  <div class="card stat"><div class="n">{{ users|length }}</div><div class="muted">Users</div></div>
+  <div class="card stat"><div class="n">{{ nodes|sum(attribute='active_peers') }}</div><div class="muted">Active connections</div></div>
+  <div class="card stat"><div class="n">{{ (nodes|sum(attribute='rx') + nodes|sum(attribute='tx'))|bytes }}</div><div class="muted">Traffic</div></div>
+</section>
+
+<section id="servers" class="card">
+  <h2>Add a server</h2>
+  <p class="muted">Create an enrollment token, then run the one-liner as root on any fresh Linux VPS (Debian/Ubuntu/RHEL/Alma/Rocky/Alpine).
+    The server installs WireGuard, registers itself and shows up below within seconds.</p>
+  <form class="inline" method="post" action="/admin/tokens">
+    <input name="label" placeholder="Label (e.g. Hetzner fleet)">
+    <input name="max_uses" type="number" min="1" placeholder="Max uses (blank = unlimited)">
+    <button class="btn primary">New token</button>
+  </form>
+  {% for t in tokens %}
+  <div class="token">
+    <div class="token-meta"><b>{{ t.label or 'Token' }}</b> <span class="muted">(click the command to copy)</span>
+      <span class="muted">used {{ t.uses }}{% if t.max_uses %}/{{ t.max_uses }}{% endif %} · {{ t.created_at }}</span>
+      <form method="post" action="/admin/tokens/{{ t.token }}/revoke"><button class="link danger">revoke</button></form>
+    </div>
+    <pre class="cmd" title="Click to copy" onclick="navigator.clipboard.writeText(this.innerText); this.classList.add('copied')">curl -fsSL {{ panel }}/agent/install.sh | sudo bash -s -- --token {{ t.token }} --name "My Server" --location "Germany"</pre>
+  </div>
+  {% else %}
+  <p class="muted">No active tokens.</p>
+  {% endfor %}
+
+  <h2 class="mt">Servers</h2>
+  {% if nodes %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>#</th><th>Name</th><th>Location</th><th>Endpoint</th><th>Status</th><th>Active</th><th>Traffic</th><th>Agent</th><th></th></tr></thead>
+    <tbody>
+    {% for n in nodes %}
+    <tr>
+      <td>{{ n.id }}</td>
+      <td><input name="name" form="nf{{ n.id }}" value="{{ n.name }}" required></td>
+      <td><input name="location" form="nf{{ n.id }}" value="{{ n.location }}"></td>
+      <td><input name="endpoint_host" form="nf{{ n.id }}" value="{{ n.endpoint_host }}" required><span class="muted">:{{ n.listen_port }}</span></td>
+      <td><span class="pill {{ 'on' if n.online else 'off' }}">{{ 'online' if n.online else 'offline' }}</span>
+          <label class="chk"><input type="checkbox" name="enabled" form="nf{{ n.id }}" value="1" {{ 'checked' if n.enabled }}> enabled</label></td>
+      <td>{{ n.active_peers }}</td>
+      <td>{{ (n.rx + n.tx)|bytes }}</td>
+      <td class="muted">{{ n.agent_version or '—' }}<br>{{ n.last_seen or 'never' }}</td>
+      <td class="nowrap"><form id="nf{{ n.id }}" method="post" action="/admin/nodes/{{ n.id }}"><button class="btn small">Save</button></form>
+        <form method="post" action="/admin/nodes/{{ n.id }}/delete" onsubmit="return confirm('Remove this server?')"><button class="btn small danger">Delete</button></form></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}<p class="muted">No servers yet — run the command above on a VPS.</p>{% endif %}
+</section>
+
+<section id="users" class="card">
+  <h2>Users</h2>
+  <form class="inline" method="post" action="/admin/users">
+    <input name="email" type="email" placeholder="email@example.com" required>
+    <input name="password" placeholder="Password (blank = generate)">
+    <label class="chk"><input type="checkbox" name="is_admin" value="1"> admin</label>
+    <button class="btn primary">Add user</button>
+  </form>
+  <p class="muted">Billing integration: {% if provision_enabled %}provisioning API enabled — see <a href="/api/docs">/api/docs</a>.{% else %}set <code>PROVISION_API_KEY</code> to let WHMCS/Stripe/your site create and suspend users via API.{% endif %}</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>#</th><th>Email</th><th>Status</th><th>Role</th><th>Traffic</th><th>Last seen</th><th>Joined</th><th></th></tr></thead>
+    <tbody>
+    {% for u in users %}
+    <tr>
+      <td>{{ u.id }}</td><td>{{ u.email }}</td>
+      <td><span class="pill {{ 'on' if u.status == 'active' else 'off' }}">{{ u.status }}</span></td>
+      <td>{{ 'admin' if u.is_admin else 'client' }}</td>
+      <td>{{ u.traffic|bytes }}</td>
+      <td class="muted">{% if u.last_hs %}{{ ((now_ts - u.last_hs) / 60)|int }} min ago{% else %}never{% endif %}</td>
+      <td class="muted">{{ u.created_at[:10] }}</td>
+      <td class="nowrap">
+        {% if u.status == 'active' %}
+        <form method="post" action="/admin/users/{{ u.id }}/suspend"><button class="btn small">Suspend</button></form>
+        {% else %}
+        <form method="post" action="/admin/users/{{ u.id }}/activate"><button class="btn small">Activate</button></form>
+        {% endif %}
+        <form method="post" action="/admin/users/{{ u.id }}/{{ 'demote' if u.is_admin else 'promote' }}"><button class="btn small">{{ 'Demote' if u.is_admin else 'Make admin' }}</button></form>
+        <form method="post" action="/admin/users/{{ u.id }}/delete" onsubmit="return confirm('Delete {{ u.email }}?')"><button class="btn small danger">Delete</button></form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endblock %}
