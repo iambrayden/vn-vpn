@@ -15,7 +15,7 @@ from pathlib import Path
 
 import qrcode
 import qrcode.image.svg
-from fastapi import FastAPI, Form, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -211,6 +211,22 @@ def require_admin(request: Request):
     if not user["is_admin"]:
         raise HTTPException(status_code=403, detail="Admins only")
     return user
+
+
+async def json_body(request: Request) -> dict:
+    """Read a JSON object body. Handlers that need it can then be plain `def` and run in the thread pool,
+    so slow work (SQLite, Stripe calls) never blocks the event loop - or the container health check."""
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Invalid body")
+    return body
+
+
+async def raw_body(request: Request) -> bytes:
+    return await request.body()
 
 
 def flash(request: Request, message: str, kind="ok"):
@@ -661,8 +677,7 @@ def billing_portal(request: Request):
 
 
 @app.post("/billing/webhook")
-async def billing_webhook(request: Request, stripe_signature: str | None = Header(None)):
-    payload = await request.body()
+def billing_webhook(payload: bytes = Depends(raw_body), stripe_signature: str | None = Header(None)):
     try:
         with db.session() as conn:
             kind = billing.handle_webhook(conn, payload, stripe_signature)
@@ -989,9 +1004,8 @@ def require_api_key(x_api_key: str | None):
 
 
 @app.post("/api/v1/users")
-async def api_create_user(request: Request, x_api_key: str | None = Header(None)):
+def api_create_user(request: Request, body: dict = Depends(json_body), x_api_key: str | None = Header(None)):
     require_api_key(x_api_key)
-    body = await request.json()
     password = body.get("password") or secrets.token_urlsafe(10)
     try:
         with db.session() as conn:
@@ -1024,10 +1038,10 @@ def api_get_user(ident: str, x_api_key: str | None = Header(None)):
 
 
 @app.put("/api/v1/users/{ident}/plan")
-async def api_set_plan(ident: str, request: Request, x_api_key: str | None = Header(None)):
+def api_set_plan(ident: str, body: dict = Depends(json_body), x_api_key: str | None = Header(None)):
     """Grant/remove a plan without Stripe: {"plan": "basic" | "pro" | ""}."""
     require_api_key(x_api_key)
-    plan = (await request.json()).get("plan", "")
+    plan = body.get("plan", "")
     if plan and plan not in billing.PLANS:
         raise HTTPException(400, f"Unknown plan; use one of {list(billing.PLANS)} or \"\"")
     with db.session() as conn:
@@ -1087,8 +1101,7 @@ def agent_whoami(request: Request):
 
 
 @app.post("/api/agent/register")
-async def agent_register(request: Request):
-    body = await request.json()
+def agent_register(request: Request, body: dict = Depends(json_body)):
     token = body.get("token", "")
     public_key = body.get("public_key", "")
     if not re.fullmatch(r"[A-Za-z0-9+/]{42,43}=?", public_key):
@@ -1146,18 +1159,12 @@ async def agent_register(request: Request):
 
 
 @app.post("/api/agent/sync")
-async def agent_sync(request: Request, authorization: str | None = Header(None)):
+def agent_sync(request: Request, body: dict = Depends(json_body), authorization: str | None = Header(None)):
     """Agent heartbeat: reports per-peer traffic, receives the desired peer list.
 
     Kept in separate transactions so optional extras (stats, logs) can never stop a server from
     checking in: 1) mark the node seen, 2) device state, 3) monitoring/logging (best effort)."""
     secret = (authorization or "").removeprefix("Bearer ").strip()
-    try:
-        body = await request.json()
-    except ValueError:
-        raise HTTPException(400, "Invalid JSON")
-    if not isinstance(body, dict):
-        raise HTTPException(400, "Invalid body")
     with db.session() as conn:
         node = conn.execute("SELECT * FROM nodes WHERE secret_hash = ?", (crypto.sha256(secret),)).fetchone()
         if not node:

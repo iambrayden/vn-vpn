@@ -158,16 +158,24 @@ def check_alerts(conn, node_online) -> list[str]:
     return messages
 
 
+def _tick(node_online, do_purge: bool):
+    with db.session() as conn:
+        messages = check_alerts(conn, node_online)
+        if do_purge:
+            purge(conn)
+    for msg in messages:
+        send_alert(msg)
+
+
 async def background_loop(node_online):
+    """Alerts every 30s, retention cleanup hourly - in a worker thread so the web server never waits on it."""
     last_purge = 0.0
     while True:
         try:
-            with db.session() as conn:
-                for msg in check_alerts(conn, node_online):
-                    await asyncio.to_thread(send_alert, msg)
-                if time.time() - last_purge > 3600:
-                    purge(conn)
-                    last_purge = time.time()
+            do_purge = time.time() - last_purge > 3600
+            await asyncio.to_thread(_tick, node_online, do_purge)
+            if do_purge:
+                last_purge = time.time()
         except Exception:
             log.exception("monitoring loop failed")
         await asyncio.sleep(30)
