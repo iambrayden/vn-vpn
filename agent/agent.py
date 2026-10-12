@@ -368,6 +368,9 @@ def apply(conf, desired, last_rendered):
     return rendered
 
 
+_skip_update_until = 0.0
+
+
 def self_update(conf, latest):
     """Download the panel's agent and exit; systemd restarts us on the new version."""
     try:
@@ -375,6 +378,12 @@ def self_update(conf, latest):
         with urllib.request.urlopen(req, timeout=30) as resp:
             code = resp.read()
         compile(code, "agent.py", "exec")  # never replace ourselves with something broken
+        served = next((l.split('"')[1] for l in code.decode().splitlines() if l.startswith("VERSION = ")), "")
+        if served != latest:  # e.g. a CDN cached an old agent.py: don't restart in a loop
+            global _skip_update_until
+            _skip_update_until = time.time() + 3600
+            log(f"panel announced agent {latest} but served {served or '?'}; retrying in an hour")
+            return
         path = os.path.abspath(__file__)
         with open(path + ".new", "wb") as f:
             f.write(code)
@@ -436,7 +445,7 @@ def run(args):
                 flows.stop()
                 flows, unsent_flows = None, []
             latest = desired.get("agent_version")
-            if latest and latest != VERSION and not args.once and not DRY_RUN:
+            if latest and latest != VERSION and not args.once and not DRY_RUN and time.time() > _skip_update_until:
                 if flows:
                     flows.stop()
                 self_update(conf, latest)
