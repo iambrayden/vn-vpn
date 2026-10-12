@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import ipaddress
 import os
+import re
 import secrets
 
 from cryptography.hazmat.primitives import serialization
@@ -13,6 +14,9 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 # so no per-node IP allocation is needed.
 VPN_SUBNET = ipaddress.ip_network(os.environ.get("VPN_SUBNET", "10.66.0.0/16"))
 CLIENT_DNS = os.environ.get("CLIENT_DNS", "1.1.1.1, 1.0.0.1")
+# 1380 instead of WireGuard's 1420 default: leaves headroom for PPPoE, mobile and other tunnels, which
+# otherwise show up as "connected but pages hang". Used for both clients and servers.
+WG_MTU = int(os.environ.get("WG_MTU", "1380"))
 PBKDF2_ROUNDS = 260_000
 
 
@@ -65,6 +69,15 @@ def allocate_address(conn) -> str:
     return client_ip(offset)
 
 
+def valid_endpoint(host: str) -> bool:
+    """Servers are IPv4-only: a public IPv4 address or a hostname (which should resolve to one)."""
+    host = host.strip()
+    try:
+        return ipaddress.ip_address(host).version == 4
+    except ValueError:
+        return bool(re.fullmatch(r"(?=.{1,253}$)([A-Za-z0-9-]{1,63}\.)+[A-Za-z]{2,63}", host))
+
+
 def client_config(device, node, email: str) -> str:
     return (
         "[Interface]\n"
@@ -72,10 +85,12 @@ def client_config(device, node, email: str) -> str:
         f"PrivateKey = {device['private_key']}\n"
         f"Address = {device['address']}/32\n"
         f"DNS = {CLIENT_DNS}\n"
+        f"MTU = {WG_MTU}\n"
         "\n"
         "[Peer]\n"
         f"PublicKey = {node['public_key']}\n"
         f"Endpoint = {node['endpoint_host']}:{node['listen_port']}\n"
+        # ::/0 routes IPv6 into the (IPv4-only) tunnel where it is dropped, so it can't leak around the VPN
         "AllowedIPs = 0.0.0.0/0, ::/0\n"
         "PersistentKeepalive = 25\n"
     )

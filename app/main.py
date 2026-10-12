@@ -1,5 +1,6 @@
 """VN-VPN management panel: client portal, admin console, provisioning API and agent API."""
 import io
+import ipaddress
 import os
 import re
 import secrets
@@ -21,6 +22,7 @@ from . import billing, countries, crypto, db
 
 BASE = Path(__file__).parent
 AGENT_DIR = BASE.parent / "agent"
+AGENT_VERSION = re.search(r'^VERSION = "([^"]+)"', (AGENT_DIR / "agent.py").read_text(), re.M).group(1)
 
 
 
@@ -584,12 +586,26 @@ def admin_nodes(conn):
         GROUP BY n.id ORDER BY n.id""")]
 
 
+def live_sessions(conn):
+    """Devices with a recent handshake, newest first, with the server they're on."""
+    rows = conn.execute("""
+        SELECT d.id, d.name device, d.active_since, u.email, n.name node, s.rx_bytes, s.tx_bytes, s.last_handshake
+        FROM devices d JOIN users u ON u.id = d.user_id
+        JOIN device_stats s ON s.device_id = d.id AND s.last_handshake = d.last_handshake
+        JOIN nodes n ON n.id = s.node_id
+        WHERE d.last_handshake > ? ORDER BY d.active_since DESC""", (time.time() - ACTIVE_WINDOW,)).fetchall()
+    return [{"id": r["id"], "email": r["email"], "device": r["device"], "node": r["node"],
+             "down": human_bytes(r["tx_bytes"]), "up": human_bytes(r["rx_bytes"]),
+             "since": ago(r["active_since"] or r["last_handshake"]).replace(" ago", "")} for r in rows]
+
+
 @app.get("/admin/status.json")
 def admin_status(request: Request):
     require_admin(request)
     with db.session() as conn:
         nodes = admin_nodes(conn)
-    return {"nodes": [{"id": n["id"], "name": n["name"], "online": n["online"], "active": n["active_peers"],
+        sessions = live_sessions(conn)
+    return {"sessions": sessions,"nodes": [{"id": n["id"], "name": n["name"], "online": n["online"], "active": n["active_peers"],
                        "traffic": human_bytes(n["rx"] + n["tx"]), "last_seen": ago(n["last_seen"])}
                       for n in nodes],
             "online": sum(n["online"] for n in nodes), "active": sum(n["active_peers"] for n in nodes)}
@@ -606,7 +622,13 @@ def admin(request: Request):
             FROM users u LEFT JOIN devices d ON d.user_id = u.id LEFT JOIN device_stats s ON s.device_id = d.id
             GROUP BY u.id ORDER BY u.id DESC""")]
         tokens = conn.execute("SELECT * FROM enroll_tokens WHERE revoked = 0 ORDER BY created_at DESC").fetchall()
-    return render(request, "admin.html", nodes=nodes, users=users, tokens=tokens,
+        sessions = live_sessions(conn)
+    for n in nodes:
+        try:
+            n["private_ip"] = ipaddress.ip_address(n["endpoint_host"]).is_private
+        except ValueError:
+            n["private_ip"] = False
+    return render(request, "admin.html", nodes=nodes, users=users, tokens=tokens, sessions=sessions,
                   panel=panel_url(request), now_ts=now_utc().timestamp(),
                   provision_enabled=bool(PROVISION_API_KEY), billing_enabled=billing.enabled(),
                   webhook_configured=bool(billing.STRIPE_WEBHOOK_SECRET))
@@ -635,6 +657,9 @@ def admin_revoke_token(request: Request, token: str):
 def admin_update_node(request: Request, node_id: int, name: str = Form(...), location: str = Form(""),
                       country: str = Form(""), endpoint_host: str = Form(...), enabled: str = Form(None)):
     require_admin(request)
+    if not crypto.valid_endpoint(endpoint_host):
+        flash(request, f"'{endpoint_host}' isn't an IPv4 address or hostname — servers are IPv4-only.", "error")
+        return RedirectResponse("/admin#servers", status_code=303)
     with db.session() as conn:
         conn.execute("UPDATE nodes SET name=?, location=?, country=?, endpoint_host=?, enabled=? WHERE id=?",
                      (name.strip(), location.strip(), countries.normalize(country), endpoint_host.strip(),
@@ -833,6 +858,9 @@ async def agent_register(request: Request):
         if not tok or (tok["max_uses"] is not None and tok["uses"] >= tok["max_uses"]):
             raise HTTPException(401, "Invalid, revoked or used-up enrollment token")
         endpoint = (body.get("endpoint") or client_ip_of(request)).strip()
+        if not crypto.valid_endpoint(endpoint):
+            raise HTTPException(400, f"'{endpoint}' isn't a public IPv4 address or hostname. "
+                                     "Servers are IPv4-only; re-run the installer with --endpoint <IPv4>.")
         hostname = str(body.get("hostname", ""))[:100]
         secret = secrets.token_urlsafe(32)
         # Re-enrolling the same box (same public key) replaces the old record instead of duplicating it.
@@ -888,8 +916,9 @@ async def agent_sync(request: Request, authorization: str | None = Header(None))
         allowed = allowed_device_ids(conn) if node["enabled"] else set()
     peers = [{"public_key": d["public_key"], "allowed_ips": f"{d['address']}/32"}
              for d in devices.values() if d["id"] in allowed]
-    return {"node_id": node["id"], "address": crypto.server_address(),
-            "listen_port": node["listen_port"], "peers": peers, "interval": 15}
+    return {"node_id": node["id"], "address": crypto.server_address(), "subnet": str(crypto.VPN_SUBNET),
+            "mtu": crypto.WG_MTU, "endpoint": node["endpoint_host"], "listen_port": node["listen_port"],
+            "peers": peers, "interval": 15, "agent_version": AGENT_VERSION}
 
 
 @app.get("/healthz")

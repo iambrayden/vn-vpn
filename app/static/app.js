@@ -215,6 +215,19 @@
     let knownIds = new Set($$('[data-node-row]').map(r => r.dataset.nodeRow));
     poll('/admin/status.json', data => {
       $('[data-k=online]') && ($('[data-k=online]').textContent = `${data.online}/${data.nodes.length}`);
+      const live = $('#live-sessions');
+      if (live) {
+        live.replaceChildren(...(data.sessions.length ? data.sessions.map(x => {
+          const tr = document.createElement('tr');
+          [x.email, x.device, x.node, x.down, x.up, x.since].forEach((v, i) => {
+            const td = document.createElement('td'); td.textContent = v;
+            if (i === 3 || i === 4) td.className = 'hide-sm';
+            if (i === 5) td.className = 'muted';
+            tr.append(td);
+          });
+          return tr;
+        }) : [Object.assign(document.createElement('tr'), { innerHTML: '<td colspan="6" class="muted">Nobody is connected right now.</td>' })]));
+      }
       $('[data-k=active]') && ($('[data-k=active]').textContent = data.active);
       for (const n of data.nodes) {
         $$(`[data-node-status="${n.id}"]`).forEach(el => {

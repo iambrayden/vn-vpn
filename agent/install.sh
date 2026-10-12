@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # VN-VPN node installer. Usage (from the admin panel):
 #   curl -fsSL __PANEL_URL__/agent/install.sh | sudo bash -s -- --token TOKEN [--name "Frankfurt 1"] [--location "Frankfurt"] [--country DE]
-# Options: --country DE (flag shown to clients), --endpoint HOST (public IP/DNS clients use; auto-detected), --port 51820, --uninstall
+# Options: --country DE (flag shown to clients), --endpoint IPV4 (public IPv4 clients use; auto-detected), --port 51820, --uninstall
 set -euo pipefail
 
 PANEL="__PANEL_URL__"
@@ -55,7 +55,6 @@ fi
 say "Enabling IP forwarding"
 cat > /etc/sysctl.d/99-vnvpn.conf <<EOF
 net.ipv4.ip_forward = 1
-net.ipv6.conf.all.forwarding = 1
 EOF
 sysctl -q -p /etc/sysctl.d/99-vnvpn.conf || true
 

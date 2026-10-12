@@ -4,6 +4,7 @@
   agent.py enroll --panel URL --token TOKEN [--name N] [--location L] [--country DE] [--endpoint HOST] [--port 51820]
   agent.py run            # sync loop (what the systemd service runs)
   agent.py run --once     # single sync, handy for debugging
+  agent.py doctor         # check forwarding, NAT, firewall, handshakes and the public endpoint
 
 Every few seconds the agent reports per-peer traffic to the panel and receives the list of
 peers this node should accept, then applies it with `wg syncconf` (no tunnel interruption).
@@ -19,7 +20,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 CONF_DIR = os.environ.get("VNVPN_DIR", "/etc/vnvpn")
 CONF_FILE = os.path.join(CONF_DIR, "agent.json")
 KEY_FILE = os.path.join(CONF_DIR, "private.key")
@@ -35,15 +36,24 @@ def sh(*cmd, input=None):
     return subprocess.run(cmd, input=input, capture_output=True, text=True, check=True).stdout
 
 
-def http(method, url, body=None, secret=None):
+def http(method, url, body=None, secret=None, ipv4_only=False):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
     req.add_header("User-Agent", f"vnvpn-agent/{VERSION}")
     if secret:
         req.add_header("Authorization", f"Bearer {secret}")
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return json.loads(resp.read())
+    if not ipv4_only:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return json.loads(resp.read())
+    # Force IPv4 so the panel sees this server's IPv4 address (clients' networks often lack IPv6)
+    orig = socket.getaddrinfo
+    socket.getaddrinfo = lambda host, port, family=0, *a, **kw: orig(host, port, socket.AF_INET, *a, **kw)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return json.loads(resp.read())
+    finally:
+        socket.getaddrinfo = orig
 
 
 def load_conf():
@@ -74,7 +84,14 @@ def enroll(args):
         panel = "https://" + panel
     endpoint = args.endpoint
     if not endpoint:
-        endpoint = http("GET", f"{panel}/api/agent/whoami")["ip"]
+        # IPv4 only: many client networks have no IPv6, so servers are always reached over IPv4
+        try:
+            endpoint = http("GET", f"{panel}/api/agent/whoami", ipv4_only=True)["ip"]
+        except OSError as e:
+            sys.exit(f"Could not reach the panel over IPv4 ({e}). This server needs a public IPv4 address; "
+                     "pass --endpoint <IPv4> if it has one.")
+        if ":" in endpoint:
+            sys.exit(f"The panel saw this server as {endpoint} (IPv6). Pass --endpoint <public IPv4>.")
     res = http("POST", f"{panel}/api/agent/register", {
         "token": args.token,
         "name": args.name or socket.gethostname(),
@@ -118,21 +135,42 @@ def render_wg_conf(conf, desired):
             private_key = f.read().strip()
     wan = conf.get("wan_iface") or default_iface()
     iface = conf["interface"]
+    subnet = desired.get("subnet") or desired["address"]
+    # -I (insert) so the rules win over host firewalls (ufw, Docker) whose FORWARD policy is DROP.
+    # MSS clamping keeps TCP working on paths with a smaller MTU (mobile, PPPoE).
+    rules = [
+        f"-t nat {{op}} POSTROUTING -s {subnet} -o {wan} -j MASQUERADE",
+        f"{{op}} FORWARD -i {iface} -j ACCEPT",
+        f"{{op}} FORWARD -o {iface} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+        f"-t mangle {{op}} FORWARD -o {iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu",
+        f"-t mangle {{op}} FORWARD -i {iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu",
+    ]
+    up = "; ".join("iptables " + r.format(op="-I") for r in rules)
+    down = "; ".join("iptables " + r.format(op="-D") for r in rules)
     lines = [
         "# Managed by vnvpn-agent - changes will be overwritten",
         "[Interface]",
         f"Address = {desired['address']}",
         f"ListenPort = {desired['listen_port']}",
         f"PrivateKey = {private_key}",
-        f"PostUp = iptables -t nat -A POSTROUTING -o {wan} -j MASQUERADE; "
-        f"iptables -A FORWARD -i {iface} -j ACCEPT; iptables -A FORWARD -o {iface} -j ACCEPT",
-        f"PostDown = iptables -t nat -D POSTROUTING -o {wan} -j MASQUERADE; "
-        f"iptables -D FORWARD -i {iface} -j ACCEPT; iptables -D FORWARD -o {iface} -j ACCEPT",
-        "",
     ]
+    if desired.get("mtu"):
+        lines.append(f"MTU = {desired['mtu']}")
+    lines += ["PostUp = sysctl -q -w net.ipv4.ip_forward=1; " + up, f"PostDown = {down}", ""]
     for p in desired["peers"]:
         lines += ["[Peer]", f"PublicKey = {p['public_key']}", f"AllowedIPs = {p['allowed_ips']}", ""]
     return "\n".join(lines)
+
+
+_APPLIED = os.path.join(CONF_DIR, "applied-interface.conf")
+
+
+def _running_interface_section():
+    try:
+        with open(_APPLIED) as f:
+            return f.read()
+    except OSError:
+        return None
 
 
 def iface_up(iface):
@@ -147,6 +185,12 @@ def apply(conf, desired, last_rendered):
     if DRY_RUN:
         print(rendered)
         return rendered
+    interface_section = rendered.split("[Peer]")[0]
+    # Peers can be hot-swapped, but interface settings (MTU, NAT rules...) need the tunnel restarted.
+    # Compare with what was last brought up, which also catches upgrades from older agents.
+    if iface_up(iface) and _running_interface_section() != interface_section:
+        log(f"interface settings changed; restarting {iface}")
+        subprocess.run(["wg-quick", "down", iface], capture_output=True)  # uses the old file's PostDown
     path = os.path.join(WG_DIR, f"{iface}.conf")
     fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
@@ -158,8 +202,28 @@ def apply(conf, desired, last_rendered):
     else:
         stripped = sh("wg-quick", "strip", iface)
         sh("wg", "syncconf", iface, "/dev/stdin", input=stripped)
+    with open(_APPLIED, "w") as f:
+        f.write(interface_section)
     log(f"applied {len(desired['peers'])} peers")
     return rendered
+
+
+def self_update(conf, latest):
+    """Download the panel's agent and exit; systemd restarts us on the new version."""
+    try:
+        req = urllib.request.Request(f"{conf['panel']}/agent/agent.py", headers={"User-Agent": f"vnvpn-agent/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            code = resp.read()
+        compile(code, "agent.py", "exec")  # never replace ourselves with something broken
+        path = os.path.abspath(__file__)
+        with open(path + ".new", "wb") as f:
+            f.write(code)
+        os.chmod(path + ".new", 0o755)
+        os.replace(path + ".new", path)
+        log(f"updated agent {VERSION} -> {latest}; restarting")
+        sys.exit(0)
+    except (OSError, SyntaxError, ValueError) as e:
+        log(f"self-update failed: {e}")
 
 
 def run(args):
@@ -182,6 +246,9 @@ def run(args):
                            secret=conf["secret"])
             last = apply(conf, desired, last)
             interval, failures = int(desired.get("interval", 15)), 0
+            latest = desired.get("agent_version")
+            if latest and latest != VERSION and not args.once and not DRY_RUN:
+                self_update(conf, latest)
         except urllib.error.HTTPError as e:
             failures += 1
             log(f"panel returned HTTP {e.code}: {e.read()[:200]!r}")
@@ -191,6 +258,79 @@ def run(args):
         if args.once:
             return 0 if failures == 0 else 1
         time.sleep(min(interval * (2 ** min(failures, 4)), 300) if failures else interval)
+
+
+def doctor(_args):
+    """Explain why clients might connect without traffic passing."""
+    ok_all = True
+
+    def check(ok, msg, fix=""):
+        nonlocal ok_all
+        ok_all &= bool(ok)
+        print(("  \033[32m✓\033[0m " if ok else "  \033[31m✗\033[0m ") + msg + ("" if ok or not fix else f"\n      → {fix}"))
+
+    def out(*cmd):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True)
+        except FileNotFoundError:  # tool not installed (e.g. no ufw)
+            return ""
+        return r.stdout if r.returncode == 0 else ""
+
+    conf = load_conf()
+    iface = conf["interface"]
+    print(f"vnvpn-agent {VERSION} doctor — node #{conf['node_id']}, panel {conf['panel']}\n")
+    try:
+        desired = http("POST", f"{conf['panel']}/api/agent/sync",
+                       {"agent_version": VERSION, "peers": peer_stats(iface)}, secret=conf["secret"])
+        check(True, f"panel reachable; {len(desired['peers'])} customer device(s) allowed on this server")
+    except Exception as e:
+        desired = {}
+        check(False, f"panel not reachable: {e}", "check DNS/HTTPS to the panel, or re-run the installer")
+
+    check(iface_up(iface), f"interface {iface} is up", f"journalctl -u vnvpn-agent -n 50; wg-quick up {iface}")
+    show = out("wg", "show", iface)
+    port = next((l.split(":")[1].strip() for l in show.splitlines() if "listening port" in l), "")
+    check(port == str(conf["listen_port"]), f"WireGuard listening on UDP {port or '?'}")
+    check(out("sysctl", "-n", "net.ipv4.ip_forward").strip() == "1", "IPv4 forwarding enabled",
+          "sysctl -w net.ipv4.ip_forward=1")
+
+    wan = conf.get("wan_iface") or default_iface()
+    actual_wan = default_iface()
+    check(wan == actual_wan, f"NAT goes out via {wan} (default route uses {actual_wan})",
+          f"edit wan_iface in {CONF_FILE} to {actual_wan} and restart: systemctl restart vnvpn-agent")
+    nat = out("iptables", "-t", "nat", "-S", "POSTROUTING")
+    check("MASQUERADE" in nat and wan in nat, "NAT (MASQUERADE) rule present", "systemctl restart vnvpn-agent")
+    fwd = out("iptables", "-S", "FORWARD")
+    check(f"-i {iface} -j ACCEPT" in fwd, "forwarding from the tunnel allowed")
+    policy = next((l for l in fwd.splitlines() if l.startswith("-P FORWARD")), "")
+    if "DROP" in policy:
+        print(f"    (FORWARD policy is DROP — fine as long as the rule above is present)")
+
+    endpoint = desired.get("endpoint", "")
+    try:
+        my_ip = http("GET", f"{conf['panel']}/api/agent/whoami", ipv4_only=True)["ip"]
+    except Exception:
+        my_ip = ""
+    if endpoint:
+        check(":" not in endpoint, f"clients connect to {endpoint}:{conf['listen_port']}",
+              f"IPv6 endpoints fail on most client networks; set the server's endpoint to {my_ip or 'its IPv4'} "
+              "in Admin → Servers → Edit")
+        if my_ip and endpoint != my_ip and not any(c.isalpha() for c in endpoint):
+            check(False, f"registered endpoint {endpoint} differs from this server's public IPv4 {my_ip}",
+                  "fix it in Admin → Servers → Edit")
+
+    ufw = out("ufw", "status")
+    if "Status: active" in ufw:
+        check(str(conf["listen_port"]) in ufw, f"ufw allows UDP {conf['listen_port']}",
+              f"ufw allow {conf['listen_port']}/udp")
+    peers = peer_stats(iface)
+    now = time.time()
+    recent = [p for p in peers if p["handshake"] and now - p["handshake"] < 180]
+    check(bool(recent) or not peers, f"{len(recent)} device(s) with a recent handshake",
+          f"no client has completed a handshake: make sure UDP {conf['listen_port']} is open in your "
+          "cloud provider's firewall / security group, and that the client's Endpoint is this server")
+    print("\nAll checks passed." if ok_all else "\nSome checks failed — see the → hints above.")
+    return 0 if ok_all else 1
 
 
 def main():
@@ -207,12 +347,15 @@ def main():
     e.add_argument("--interface", default="wg0")
     r = sub.add_parser("run")
     r.add_argument("--once", action="store_true")
+    sub.add_parser("doctor")
     sub.add_parser("version")
     args = ap.parse_args()
     if args.cmd == "enroll":
         enroll(args)
     elif args.cmd == "run":
         sys.exit(run(args))
+    elif args.cmd == "doctor":
+        sys.exit(doctor(args))
     else:
         print(VERSION)
 

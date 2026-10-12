@@ -279,3 +279,6 @@ td form { display: inline; }
 .devices-big b { font-size: 18px; }
 .plan .perks { flex: 1; margin-bottom: 4px; }
 .plan form { margin: 0; }
+
+table.plain th { background: none; padding-left: 0; }
+table.plain td { padding-left: 0; }

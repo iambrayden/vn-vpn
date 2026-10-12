@@ -40,6 +40,18 @@
     <div class="card stat"><div class="k">Total traffic</div><div class="v">{{ (nodes|sum(attribute='rx') + nodes|sum(attribute='tx'))|bytes }}</div></div>
   </div>
 
+  <div class="card">
+    <div class="section-head" style="margin:0 0 6px"><h2><span class="dot live" style="display:inline-block;color:var(--ok);margin-right:8px"></span>Connected now</h2>
+      <span class="muted small">updates every 5 seconds</span></div>
+    <div class="table-wrap"><table class="plain">
+      <thead><tr><th>Customer</th><th>Device</th><th>Server</th><th class="hide-sm">↓ Down</th><th class="hide-sm">↑ Up</th><th>For</th></tr></thead>
+      <tbody id="live-sessions">
+        {% for x in sessions %}<tr><td>{{ x.email }}</td><td>{{ x.device }}</td><td>{{ x.node }}</td><td class="hide-sm">{{ x.down }}</td><td class="hide-sm">{{ x.up }}</td><td class="muted">{{ x.since }}</td></tr>
+        {% else %}<tr><td colspan="6" class="muted">Nobody is connected right now.</td></tr>{% endfor %}
+      </tbody>
+    </table></div>
+  </div>
+
   <div class="cols-2">
     <div class="card">
       <div class="section-head" style="margin:0 0 6px"><h2>Server health</h2><a href="#servers" class="small">Manage →</a></div>
@@ -78,6 +90,7 @@
     <tr data-node-row="{{ n.id }}">
       <td><div class="cell-main"><span class="flag">{{ n.country|flag }}</span>
         <div><b>{{ n.name }}</b>{% if not n.enabled %} <span class="pill warn">Hidden</span>{% endif %}
+          {% if n.private_ip %} <span class="pill off" title="Clients can't reach a private address. Edit the server and set its public IPv4.">Private IP</span>{% endif %}
           <div class="muted small">{{ n.location or '—' }}</div></div></div></td>
       <td>{{ node_status(n) }}</td>
       <td data-node-active="{{ n.id }}">{{ n.active_peers }}</td>
