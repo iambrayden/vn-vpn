@@ -4,11 +4,12 @@ A self-hosted, resellable WireGuard VPN suite:
 
 - **Management panel** (FastAPI + SQLite, one container) — deploy on Coolify.
 - **Node agent** — turn any Linux VPS into a VPN server with one command. It installs WireGuard, registers with the panel and keeps its peer list in sync every 15s.
-- **Client portal** — customers sign up, get access on every server instantly, and switch locations by importing configs / scanning QR codes in the WireGuard app.
+- **Client portal** — customers sign up, get a guided 3-step setup tailored to their device, and pick locations by flag with live load and a "Recommended" pick. The page turns green live when their tunnel connects; switching country is one tap in the WireGuard app.
 - **Provisioning API** — let your billing system (WHMCS, Stripe webhook, your website) create, suspend and delete users.
 
-![Admin](docs/admin.png)
-![Portal](docs/portal.png)
+| Client portal | Admin dashboard | Add-server wizard |
+|---|---|---|
+| ![Portal](docs/portal.png) | ![Admin](docs/admin.png) | ![Add server](docs/add-server.png) |
 
 ## How it works
 
@@ -34,6 +35,7 @@ A self-hosted, resellable WireGuard VPN suite:
    | `OPEN_SIGNUP` | no | `true` (default) shows the public sign-up page. |
    | `BRAND_NAME` | no | Shown in the UI and config file names. |
    | `VPN_SUBNET`, `CLIENT_DNS` | no | Defaults `10.66.0.0/16`, `1.1.1.1, 1.0.0.1`. |
+   | `NODE_CAPACITY` | no | Connected users at which a server shows as "Busy" (default 250). |
    `SECRET_KEY` and `PUBLIC_URL` are filled automatically by Coolify's `SERVICE_PASSWORD_64_SECRET` / `SERVICE_FQDN_PANEL` magic variables.
 3. Set the domain for the `panel` service (e.g. `https://vpn.example.com`) and deploy. Data lives in the `vnvpn-data` volume.
 
@@ -41,13 +43,13 @@ Without Coolify: `docker build -t vnvpn . && docker run -p 8000:8000 -v vnvpn:/d
 
 ## Add a VPN server
 
-1. Admin → **Add a server** → **New token** (unlimited or N uses — one token can enroll a whole fleet).
+1. Admin → **Add server**. The wizard builds the command for you: pick a name, city and country (shown as a flag to customers). Create an enrollment token under *Manage enrollment tokens* if you don't have one (unlimited or N uses — one token can enroll a whole fleet).
 2. On a fresh VPS (Debian/Ubuntu/RHEL/Alma/Rocky/Alpine), as root:
    ```bash
-   curl -fsSL https://vpn.example.com/agent/install.sh | sudo bash -s -- --token <TOKEN> --name "Frankfurt 1" --location "Germany"
+   curl -fsSL https://vpn.example.com/agent/install.sh | sudo bash -s -- --token <TOKEN> --name "Frankfurt 1" --location "Frankfurt" --country DE
    ```
    Optional: `--endpoint vpn-de1.example.com` (otherwise the public IP is auto-detected), `--port 51820`.
-3. The server appears as **online** in the panel and in every customer's portal. Open **UDP 51820** in your cloud provider's firewall/security group.
+3. The wizard notices the new server check in and takes you to it; it's immediately available in every customer's portal. Open **UDP 51820** in your cloud provider's firewall/security group.
 
 Logs: `journalctl -u vnvpn-agent -f` · Uninstall: `curl -fsSL https://vpn.example.com/agent/install.sh | sudo bash -s -- --uninstall`
 

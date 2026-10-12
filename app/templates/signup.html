@@ -1,14 +1,23 @@
 {% extends "base.html" %}
 {% block title %}Sign up · {{ brand }}{% endblock %}
 {% block content %}
-<div class="auth card">
-  <h1>Create your account</h1>
-  <p class="muted">Your VPN access is provisioned instantly on every server.</p>
-  <form method="post" action="/signup">
-    <label>Email <input type="email" name="email" required autofocus></label>
-    <label>Password <input type="password" name="password" minlength="8" required></label>
-    <button class="btn primary wide">Sign up</button>
-  </form>
-  <p class="muted">Already have an account? <a href="/login">Log in</a></p>
+<div class="auth-wrap">
+  <div class="card auth">
+    <h1>Create your account</h1>
+    <p class="muted">You'll be connected in under two minutes.</p>
+    <form method="post" action="/signup">
+      <label>Email <input type="email" name="email" autocomplete="email" required autofocus></label>
+      <label>Password <span class="hint">· at least 8 characters</span>
+        <span class="pw"><input type="password" name="password" minlength="8" autocomplete="new-password" required><button type="button" class="btn ghost" data-reveal>Show</button></span>
+      </label>
+      <button class="btn primary block">Create account</button>
+    </form>
+    <ul class="perks">
+      <li>Instant access to every server location</li>
+      <li>Works on iPhone, Android, Windows, Mac and Linux</li>
+      <li>Switch countries with one tap</li>
+    </ul>
+    <p class="alt muted">Already have an account? <a href="/login">Log in</a></p>
+  </div>
 </div>
 {% endblock %}

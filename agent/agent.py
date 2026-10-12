@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """VN-VPN node agent (stdlib only).
 
-  agent.py enroll --panel URL --token TOKEN [--name N] [--location L] [--endpoint HOST] [--port 51820]
+  agent.py enroll --panel URL --token TOKEN [--name N] [--location L] [--country DE] [--endpoint HOST] [--port 51820]
   agent.py run            # sync loop (what the systemd service runs)
   agent.py run --once     # single sync, handy for debugging
 
@@ -77,6 +77,7 @@ def enroll(args):
         "token": args.token,
         "name": args.name or socket.gethostname(),
         "location": args.location or "",
+        "country": args.country or "",
         "endpoint": endpoint,
         "listen_port": args.port,
         "public_key": public_key(),
@@ -198,6 +199,7 @@ def main():
     e.add_argument("--token", required=True)
     e.add_argument("--name")
     e.add_argument("--location")
+    e.add_argument("--country", help="ISO country code for the flag, e.g. DE")
     e.add_argument("--endpoint", help="public IP/hostname clients connect to (auto-detected)")
     e.add_argument("--port", type=int, default=51820)
     e.add_argument("--interface", default="wg0")

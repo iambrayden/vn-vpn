@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     name          TEXT NOT NULL,
     location      TEXT NOT NULL DEFAULT '',
+    country       TEXT NOT NULL DEFAULT '',     -- ISO 3166-1 alpha-2
     endpoint_host TEXT NOT NULL,
     listen_port   INTEGER NOT NULL DEFAULT 51820,
     public_key    TEXT NOT NULL,
@@ -70,7 +71,17 @@ def session():
         conn.close()
 
 
+# Columns added after the first release: (table, column, definition)
+MIGRATIONS = [
+    ("nodes", "country", "TEXT NOT NULL DEFAULT ''"),
+]
+
+
 def init():
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     with session() as conn:
         conn.executescript(SCHEMA)
+        for table, column, definition in MIGRATIONS:
+            cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")

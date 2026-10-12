@@ -1,49 +1,162 @@
 {% extends "base.html" %}
 {% block title %}My VPN · {{ brand }}{% endblock %}
+{% block page %}portal{% endblock %}
+
+{% macro load_label(load) %}{{ 'Busy' if load >= 80 else 'Moderate' if load >= 50 else 'Low load' }}{% endmacro %}
+
 {% block content %}
-<section class="head">
-  <div>
-    <h1>Choose a server</h1>
-    <p class="muted">Install the free <a href="https://www.wireguard.com/install/" target="_blank" rel="noopener">WireGuard app</a>,
-      then import a config (or scan the QR code on your phone). Import several to switch between locations with one tap.</p>
-  </div>
-  <div class="actions">
-    {% if user.status == 'active' and nodes %}<a class="btn primary" href="/portal/configs.zip">Download all configs</a>{% endif %}
-  </div>
-</section>
+<div class="stack">
 
 {% if user.status != 'active' %}
-  <div class="flash error">Your account is suspended. Contact support to restore access.</div>
-{% elif not nodes %}
-  <div class="card empty">No servers are available yet. Check back soon.</div>
-{% else %}
-<div class="grid">
-  {% for n in nodes %}
-  <div class="card server">
-    <div class="server-head">
-      <div>
-        <div class="loc">{{ n.location or '—' }}</div>
-        <h2>{{ n.name }}</h2>
-      </div>
-      <span class="pill {{ 'on' if n.online else 'off' }}">{{ 'Online' if n.online else 'Offline' }}</span>
-    </div>
-    {% if n.connected %}<p class="connected">● You're connected here · ↓{{ n.tx|bytes }} ↑{{ n.rx|bytes }}</p>{% endif %}
-    <div class="row">
-      <a class="btn primary" href="/portal/config/{{ n.id }}.conf">Download config</a>
-      <button class="btn" onclick="document.getElementById('qr{{ n.id }}').toggleAttribute('hidden')">QR code</button>
-    </div>
-    <div id="qr{{ n.id }}" class="qr" hidden><img loading="lazy" src="/portal/qr/{{ n.id }}.svg" alt="QR code for {{ n.name }}"></div>
-  </div>
-  {% endfor %}
+<div class="card empty">
+  <div class="big">⏸️</div>
+  <h1>Your account is paused</h1>
+  <p>Your VPN access is currently suspended. Please contact support or renew your subscription to reconnect.</p>
 </div>
+{% else %}
+
+<!-- live connection status -->
+<section class="card hero{{ ' connected' if connected }}">
+  <div class="shield">
+    <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 3.3v5.6c0 4.8-3.3 8.4-8 9.7-4.7-1.3-8-4.9-8-9.7V5.3z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg>
+  </div>
+  <div class="hero-text">
+    <h1 data-k="hero-title">{{ 'Protected · ' ~ connected.name if connected else 'Not connected' }}</h1>
+    <p class="muted" data-k="hero-sub" style="margin:0">{{ 'Your traffic is encrypted and routed through the VPN.' if connected else 'Turn on a tunnel in the WireGuard app to get protected.' }}</p>
+  </div>
+  <div class="hero-meta">
+    <div><div class="k">Downloaded</div><div class="v" data-k="down">{{ connected.down|bytes if connected else '—' }}</div></div>
+    <div><div class="k">Uploaded</div><div class="v" data-k="up">{{ connected.up|bytes if connected else '—' }}</div></div>
+    <div class="hide-sm"><div class="k">Tunnel IP</div><div class="v mono">{{ vpn_ip }}</div></div>
+  </div>
+</section>
+
+<!-- setup guide: open until the user has connected once -->
+<details class="card setup" {{ 'open' if not ever_connected }}>
+  <summary>
+    <div><h2>{{ 'Get connected in 3 steps' if not ever_connected else 'How to connect a new device' }}</h2>
+      <span class="muted small">Takes about two minutes.</span></div>
+    <svg class="chev" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+  </summary>
+  <div class="steps">
+    <div class="step">
+      <h3>Install WireGuard</h3>
+      <p>The free, official app. We've highlighted the one for this device.</p>
+      <div class="platforms">
+        <a data-os="ios" href="https://apps.apple.com/app/wireguard/id1441195209" target="_blank" rel="noopener">iPhone / iPad</a>
+        <a data-os="android" href="https://play.google.com/store/apps/details?id=com.wireguard.android" target="_blank" rel="noopener">Android</a>
+        <a data-os="windows" href="https://download.wireguard.com/windows-client/wireguard-installer.exe" rel="noopener">Windows</a>
+        <a data-os="macos" href="https://apps.apple.com/app/wireguard/id1451685025" target="_blank" rel="noopener">macOS</a>
+        <a data-os="linux" href="https://www.wireguard.com/install/" target="_blank" rel="noopener">Linux</a>
+      </div>
+    </div>
+    <div class="step">
+      <h3>Add a location</h3>
+      <p data-desktop-only>Click <b>Download</b> on a server below and import the file in WireGuard — or tap <b>QR</b> and scan it with the app on your phone.</p>
+      <p data-mobile-only hidden>Tap <b>Download</b> on a server below and open the file with WireGuard. Add as many locations as you like.</p>
+    </div>
+    <div class="step">
+      <h3>Switch it on</h3>
+      <p>Toggle the tunnel on in WireGuard. This page turns green when you're protected. To change country, just switch tunnels.</p>
+    </div>
+  </div>
+</details>
+
+<!-- servers -->
+<section>
+  <div class="section-head">
+    <div><h2>Locations</h2><span class="muted small">{{ nodes|selectattr('online')|list|length }} of {{ nodes|length }} online</span></div>
+    {% if nodes %}
+    <div class="toolbar">
+      {% if nodes|length > 6 %}
+      <label class="search sr-label" style="margin:0">
+        <span class="sr-only">Search locations</span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        <input type="search" placeholder="Search country or city" data-filter="#server-list">
+      </label>
+      {% endif %}
+      <a class="btn" href="/portal/configs.zip" title="One file per location, for importing into WireGuard on a computer">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16"/></svg>
+        All locations (.zip)</a>
+    </div>
+    {% endif %}
+  </div>
+
+  {% if not nodes %}
+  <div class="card empty"><div class="big">🛰️</div><h2>Servers are on the way</h2><p>No locations are available yet. Check back shortly.</p></div>
+  {% else %}
+  <div class="servers" id="server-list">
+    {% for n in nodes %}
+    <article class="card server{{ ' is-connected' if n.connected }}{{ ' is-offline' if not n.online }}" data-node="{{ n.id }}">
+      {% if n.recommended %}<span class="ribbon">★ Recommended</span>{% endif %}
+      <div class="server-top">
+        <div class="flag" aria-hidden="true">{{ n.country|flag }}</div>
+        <div style="min-width:0">
+          <div class="server-name">{{ n.name }}</div>
+          <div class="server-sub">{{ n.location }}{% if n.location and n.country_name and n.location != n.country_name %}, {% endif %}{{ n.country_name if n.country_name != n.location }}</div>
+        </div>
+        <div class="server-badges">
+          {% if n.connected %}<span class="pill on" data-k="status"><span class="dot live"></span>Connected</span>
+          {% elif n.online %}<span class="pill neutral" data-k="status">Online</span>
+          {% else %}<span class="pill off" data-k="status">Offline</span>{% endif %}
+        </div>
+      </div>
+      <div class="load" title="Current server load">
+        <span class="meter{{ ' high' if n.load >= 80 else ' mid' if n.load >= 50 }}"><i style="width: {{ [n.load, 4]|max }}%"></i></span>
+        <span data-k="load">{{ load_label(n.load) }}</span>
+      </div>
+      <div class="server-actions">
+        <a class="btn primary" href="/portal/config/{{ n.id }}.conf">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16"/></svg>
+          Download</a>
+        <button class="btn" data-open="qr-{{ n.id }}" title="Show QR code to scan with your phone">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 17h4v4"/></svg>
+          QR</button>
+      </div>
+    </article>
+    {% endfor %}
+    <div class="card empty" data-static="1" data-empty-for="#server-list" hidden style="grid-column:1/-1">No locations match your search.</div>
+  </div>
+  {% endif %}
+</section>
+
 {% endif %}
 
-<section class="card details">
-  <h3>Your connection</h3>
-  <p>Tunnel IP: <code>{{ vpn_ip }}</code> · Status: <b>{{ user.status }}</b></p>
-  <form method="post" action="/portal/rotate-key" onsubmit="return confirm('Old configs will stop working. Continue?')">
-    <button class="btn danger small">Reset my keys</button>
-    <span class="muted">Use this if a device with your config was lost.</span>
-  </form>
+<!-- account -->
+<section id="account">
+  <div class="section-head"><h2>Account</h2></div>
+  <div class="cols-2">
+    <form class="card" method="post" action="/account/password">
+      <h3>Change password</h3>
+      <label>Current password <span class="pw"><input type="password" name="current" autocomplete="current-password" required><button type="button" class="btn ghost" data-reveal>Show</button></span></label>
+      <label>New password <span class="hint">· at least 8 characters</span><span class="pw"><input type="password" name="new" minlength="8" autocomplete="new-password" required><button type="button" class="btn ghost" data-reveal>Show</button></span></label>
+      <button class="btn" style="margin-top:16px">Update password</button>
+    </form>
+    <div class="card">
+      <h3>Connection details</h3>
+      <p class="muted small">Email: {{ user.email }}<br>Tunnel IP: <span class="mono">{{ vpn_ip }}</span><br>Status:
+        <span class="pill {{ 'on' if user.status == 'active' else 'off' }}">{{ user.status|capitalize }}</span></p>
+      <h3 style="margin-top:18px">Lost a device?</h3>
+      <p class="muted small">Reset your keys to cut off every device using your current setup. You'll need to re-add your locations afterwards.</p>
+      <form method="post" action="/portal/rotate-key" data-confirm="All devices using your current configs will be disconnected within ~15 seconds. You'll need to download your locations again." data-confirm-label="Reset keys">
+        <button class="btn danger">Reset my keys</button>
+      </form>
+    </div>
+  </div>
 </section>
+</div>
+{% endblock %}
+
+{% block dialogs %}
+{% if user.status == 'active' %}
+{% for n in nodes %}
+<dialog id="qr-{{ n.id }}">
+  <div class="dlg-head"><h2>{{ n.country|flag }} {{ n.name }}</h2><button class="btn ghost icon" data-close aria-label="Close">✕</button></div>
+  <div class="dlg-body" style="text-align:center">
+    <div class="qr-box"><img loading="lazy" src="/portal/qr/{{ n.id }}.svg" alt="QR code for {{ n.name }}"></div>
+    <p class="muted small">In WireGuard on your phone, tap <b>+</b> → <b>Scan from QR code</b>.<br>Keep this code private — it's your personal key.</p>
+  </div>
+</dialog>
+{% endfor %}
+{% endif %}
 {% endblock %}

@@ -1,13 +1,18 @@
 {% extends "base.html" %}
 {% block title %}Log in · {{ brand }}{% endblock %}
 {% block content %}
-<div class="auth card">
-  <h1>Log in</h1>
-  <form method="post" action="/login">
-    <label>Email <input type="email" name="email" required autofocus></label>
-    <label>Password <input type="password" name="password" required></label>
-    <button class="btn primary wide">Log in</button>
-  </form>
-  {% if open_signup %}<p class="muted">New here? <a href="/signup">Create an account</a></p>{% endif %}
+<div class="auth-wrap">
+  <div class="card auth">
+    <h1>Welcome back</h1>
+    <p class="muted">Log in to manage your VPN connections.</p>
+    <form method="post" action="/login">
+      <label>Email <input type="email" name="email" autocomplete="email" required autofocus></label>
+      <label>Password
+        <span class="pw"><input type="password" name="password" autocomplete="current-password" required><button type="button" class="btn ghost" data-reveal>Show</button></span>
+      </label>
+      <button class="btn primary block">Log in</button>
+    </form>
+    {% if open_signup %}<p class="alt muted">New to {{ brand }}? <a href="/signup">Create an account</a></p>{% endif %}
+  </div>
 </div>
 {% endblock %}

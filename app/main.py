@@ -16,7 +16,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import crypto, db
+from . import countries, crypto, db
 
 BASE = Path(__file__).parent
 AGENT_DIR = BASE.parent / "agent"
@@ -41,6 +41,8 @@ BRAND = os.environ.get("BRAND_NAME", "VN-VPN")
 OPEN_SIGNUP = os.environ.get("OPEN_SIGNUP", "true").lower() in ("1", "true", "yes")
 PROVISION_API_KEY = os.environ.get("PROVISION_API_KEY", "")
 NODE_OFFLINE_AFTER = timedelta(seconds=int(os.environ.get("NODE_OFFLINE_AFTER", "90")))
+NODE_CAPACITY = int(os.environ.get("NODE_CAPACITY", "250"))  # active users before a node shows as "busy"
+ACTIVE_WINDOW = 180  # seconds since last handshake that still counts as connected
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 app = FastAPI(title=BRAND, docs_url="/api/docs", redoc_url=None)
@@ -60,7 +62,25 @@ def human_bytes(n):
         n /= 1024
 
 
+def ago(value):
+    """'3 min ago' from an ISO timestamp (UTC) or a unix timestamp."""
+    if not value:
+        return "never"
+    if isinstance(value, (int, float)):
+        ts = float(value)
+    else:
+        ts = datetime.fromisoformat(value).replace(tzinfo=timezone.utc).timestamp()
+    secs = max(0, int(now_utc().timestamp() - ts))
+    for unit, size in (("d", 86400), ("h", 3600), ("min", 60)):
+        if secs >= size:
+            return f"{secs // size} {unit} ago"
+    return "just now"
+
+
 templates.env.filters["bytes"] = human_bytes
+templates.env.filters["ago"] = ago
+templates.env.filters["flag"] = countries.flag
+templates.env.globals["countries"] = countries.COUNTRIES
 
 
 # --------------------------------------------------------------------------- helpers
@@ -226,19 +246,61 @@ def logout(request: Request):
 
 # --------------------------------------------------------------------------- client portal
 
+def portal_nodes(conn, user):
+    """Servers visible to a client, with their own connection state and server load."""
+    nodes = visible_nodes(conn)
+    now = now_utc().timestamp()
+    stats = {r["node_id"]: r for r in conn.execute("SELECT * FROM peer_stats WHERE user_id = ?", (user["id"],))}
+    active = {r["node_id"]: r["n"] for r in conn.execute(
+        "SELECT node_id, COUNT(*) n FROM peer_stats WHERE last_handshake > ? GROUP BY node_id",
+        (now - ACTIVE_WINDOW,))}
+    for n in nodes:
+        s = stats.get(n["id"])
+        n["connected"] = bool(s and now - s["last_handshake"] < ACTIVE_WINDOW)
+        # rx/tx are from the server's point of view: server rx = client upload
+        n["down"], n["up"] = (s["tx_bytes"], s["rx_bytes"]) if s else (0, 0)
+        n["load"] = min(100, round(100 * active.get(n["id"], 0) / NODE_CAPACITY))
+        n["country_name"] = countries.COUNTRIES.get(n["country"], "")
+        n["recommended"] = False
+    online = [n for n in nodes if n["online"]]
+    if len(online) > 1:
+        min(online, key=lambda n: n["load"])["recommended"] = True
+    nodes.sort(key=lambda n: (not n["online"], n["country_name"] or n["location"], n["name"]))
+    return nodes
+
+
 @app.get("/portal", response_class=HTMLResponse)
 def portal(request: Request):
     user = require_user(request)
     with db.session() as conn:
-        nodes = visible_nodes(conn)
-        stats = {r["node_id"]: r for r in conn.execute(
-            "SELECT * FROM peer_stats WHERE user_id = ?", (user["id"],))}
-    for n in nodes:
-        s = stats.get(n["id"])
-        n["connected"] = bool(s and s["last_handshake"] and
-                              now_utc().timestamp() - s["last_handshake"] < 180)
-        n["rx"], n["tx"] = (s["rx_bytes"], s["tx_bytes"]) if s else (0, 0)
-    return render(request, "portal.html", nodes=nodes, vpn_ip=crypto.client_ip(user["id"]))
+        nodes = portal_nodes(conn, user)
+        ever_connected = conn.execute("SELECT 1 FROM peer_stats WHERE user_id = ? AND last_handshake > 0",
+                                      (user["id"],)).fetchone() is not None
+    return render(request, "portal.html", nodes=nodes, vpn_ip=crypto.client_ip(user["id"]),
+                  connected=next((n for n in nodes if n["connected"]), None), ever_connected=ever_connected)
+
+
+@app.get("/portal/status.json")
+def portal_status(request: Request):
+    user = require_user(request)
+    with db.session() as conn:
+        nodes = portal_nodes(conn, user)
+    return {"nodes": [{k: n[k] for k in ("id", "name", "online", "connected", "down", "up", "load")}
+                      for n in nodes]}
+
+
+@app.post("/account/password")
+def change_password(request: Request, current: str = Form(...), new: str = Form(...)):
+    user = require_user(request)
+    if not crypto.verify_password(current, user["password_hash"]):
+        flash(request, "Your current password is incorrect.", "error")
+    elif len(new) < 8:
+        flash(request, "New password must be at least 8 characters.", "error")
+    else:
+        with db.session() as conn:
+            conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (crypto.hash_password(new), user["id"]))
+        flash(request, "Password updated.")
+    return RedirectResponse(request.headers.get("referer") or "/portal", status_code=303)
 
 
 def _user_node(request: Request, node_id: int):
@@ -253,7 +315,10 @@ def _user_node(request: Request, node_id: int):
 
 
 def _conf_name(node) -> str:
-    slug = re.sub(r"[^A-Za-z0-9_=+.-]", "-", f"{BRAND}-{node['location'] or node['name']}")
+    label = node["location"] or node["name"]
+    if node["country"]:
+        label = f"{node['country']}-{label}"
+    slug = re.sub(r"[^A-Za-z0-9_=+.-]+", "-", label).strip("-")
     return slug[:15]  # WireGuard interface names are limited to 15 chars
 
 
@@ -302,21 +367,36 @@ def rotate_key(request: Request):
     priv, pub = crypto.wg_keypair()
     with db.session() as conn:
         conn.execute("UPDATE users SET private_key = ?, public_key = ? WHERE id = ?", (priv, pub, user["id"]))
-    flash(request, "New keys issued. Re-download your configs; old ones stop working within ~15 seconds.")
+    flash(request, "New keys issued. Download your locations again — old configs stop working within ~15 seconds.", "info")
     return RedirectResponse("/portal", status_code=303)
 
 
 # --------------------------------------------------------------------------- admin console
 
+def admin_nodes(conn):
+    return [dict(r, online=node_online(r)) for r in conn.execute(f"""
+        SELECT n.*, COALESCE(SUM(s.rx_bytes),0) rx, COALESCE(SUM(s.tx_bytes),0) tx,
+               COUNT(CASE WHEN s.last_handshake > strftime('%s','now') - {ACTIVE_WINDOW} THEN 1 END) active_peers
+        FROM nodes n LEFT JOIN peer_stats s ON s.node_id = n.id
+        GROUP BY n.id ORDER BY n.id""")]
+
+
+@app.get("/admin/status.json")
+def admin_status(request: Request):
+    require_admin(request)
+    with db.session() as conn:
+        nodes = admin_nodes(conn)
+    return {"nodes": [{"id": n["id"], "name": n["name"], "online": n["online"], "active": n["active_peers"],
+                       "traffic": human_bytes(n["rx"] + n["tx"]), "last_seen": ago(n["last_seen"])}
+                      for n in nodes],
+            "online": sum(n["online"] for n in nodes), "active": sum(n["active_peers"] for n in nodes)}
+
+
 @app.get("/admin", response_class=HTMLResponse)
 def admin(request: Request):
     require_admin(request)
     with db.session() as conn:
-        nodes = [dict(r, online=node_online(r)) for r in conn.execute("""
-            SELECT n.*, COALESCE(SUM(s.rx_bytes),0) rx, COALESCE(SUM(s.tx_bytes),0) tx,
-                   COUNT(CASE WHEN s.last_handshake > strftime('%s','now') - 180 THEN 1 END) active_peers
-            FROM nodes n LEFT JOIN peer_stats s ON s.node_id = n.id
-            GROUP BY n.id ORDER BY n.id""")]
+        nodes = admin_nodes(conn)
         users = conn.execute("""
             SELECT u.*, COALESCE(SUM(s.rx_bytes + s.tx_bytes),0) traffic, MAX(s.last_handshake) last_hs
             FROM users u LEFT JOIN peer_stats s ON s.user_id = u.id
@@ -334,7 +414,7 @@ def admin_new_token(request: Request, label: str = Form(""), max_uses: str = For
         conn.execute("INSERT INTO enroll_tokens (token, label, max_uses) VALUES (?,?,?)",
                      (secrets.token_urlsafe(24), label.strip(), int(max_uses) if max_uses.strip() else None))
     flash(request, "Enrollment token created.")
-    return RedirectResponse("/admin#servers", status_code=303)
+    return RedirectResponse("/admin#servers/add", status_code=303)
 
 
 @app.post("/admin/tokens/{token}/revoke")
@@ -343,17 +423,26 @@ def admin_revoke_token(request: Request, token: str):
     with db.session() as conn:
         conn.execute("UPDATE enroll_tokens SET revoked = 1 WHERE token = ?", (token,))
     flash(request, "Token revoked.")
-    return RedirectResponse("/admin#servers", status_code=303)
+    return RedirectResponse("/admin#servers/add", status_code=303)
 
 
 @app.post("/admin/nodes/{node_id}")
 def admin_update_node(request: Request, node_id: int, name: str = Form(...), location: str = Form(""),
-                      endpoint_host: str = Form(...), enabled: str = Form(None)):
+                      country: str = Form(""), endpoint_host: str = Form(...), enabled: str = Form(None)):
     require_admin(request)
     with db.session() as conn:
-        conn.execute("UPDATE nodes SET name=?, location=?, endpoint_host=?, enabled=? WHERE id=?",
-                     (name.strip(), location.strip(), endpoint_host.strip(), int(bool(enabled)), node_id))
-    flash(request, f"Server #{node_id} updated.")
+        conn.execute("UPDATE nodes SET name=?, location=?, country=?, endpoint_host=?, enabled=? WHERE id=?",
+                     (name.strip(), location.strip(), countries.normalize(country), endpoint_host.strip(),
+                      int(bool(enabled)), node_id))
+    flash(request, f"Saved {name.strip()}.")
+    return RedirectResponse("/admin#servers", status_code=303)
+
+
+@app.post("/admin/nodes/{node_id}/toggle")
+def admin_toggle_node(request: Request, node_id: int):
+    require_admin(request)
+    with db.session() as conn:
+        conn.execute("UPDATE nodes SET enabled = 1 - enabled WHERE id = ?", (node_id,))
     return RedirectResponse("/admin#servers", status_code=303)
 
 
@@ -374,7 +463,7 @@ def admin_create_user(request: Request, email: str = Form(...), password: str = 
     try:
         with db.session() as conn:
             create_user(conn, email, password, is_admin=bool(is_admin))
-        flash(request, f"Created {email} with password: {password}")
+        flash(request, f"Created {email} — password: {password}", "info")
     except ValueError as e:
         flash(request, str(e), "error")
     return RedirectResponse("/admin#users", status_code=303)
@@ -397,7 +486,9 @@ def admin_user_action(request: Request, user_id: int, action: str):
         raise HTTPException(404)
     with db.session() as conn:
         conn.execute(sql, (user_id,))
-    flash(request, f"User #{user_id}: {action} done.")
+    flash(request, {"suspend": "User suspended — disconnected from all servers within ~15s.",
+                    "activate": "User reactivated.", "promote": "Admin rights granted.",
+                    "demote": "Admin rights removed.", "delete": "User deleted."}[action])
     return RedirectResponse("/admin#users", status_code=303)
 
 
@@ -465,7 +556,8 @@ def api_delete_user(ident: str, x_api_key: str | None = Header(None)):
 def api_servers():
     """Public server list (e.g. for a status page or a client app)."""
     with db.session() as conn:
-        return [{"id": n["id"], "name": n["name"], "location": n["location"], "online": n["online"]}
+        return [{"id": n["id"], "name": n["name"], "location": n["location"], "country": n["country"],
+                 "online": n["online"]}
                 for n in visible_nodes(conn)]
 
 
@@ -511,9 +603,10 @@ async def agent_register(request: Request):
             node_id = existing["id"]
         else:
             cur = conn.execute(
-                "INSERT INTO nodes (name, location, endpoint_host, listen_port, public_key, secret_hash, hostname) "
-                "VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO nodes (name, location, country, endpoint_host, listen_port, public_key, secret_hash, "
+                "hostname) VALUES (?,?,?,?,?,?,?,?)",
                 (str(body.get("name") or hostname or endpoint)[:100], str(body.get("location", ""))[:100],
+                 countries.normalize(body.get("country")) or countries.normalize(body.get("location")),
                  endpoint, int(body.get("listen_port", 51820)), public_key, crypto.sha256(secret), hostname))
             node_id = cur.lastrowid
         conn.execute("UPDATE enroll_tokens SET uses = uses + 1 WHERE token = ?", (token,))

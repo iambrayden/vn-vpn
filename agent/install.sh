@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # VN-VPN node installer. Usage (from the admin panel):
-#   curl -fsSL __PANEL_URL__/agent/install.sh | sudo bash -s -- --token TOKEN [--name "Frankfurt 1"] [--location "DE"]
-# Options: --endpoint HOST (public IP/DNS clients use; auto-detected), --port 51820, --uninstall
+#   curl -fsSL __PANEL_URL__/agent/install.sh | sudo bash -s -- --token TOKEN [--name "Frankfurt 1"] [--location "Frankfurt"] [--country DE]
+# Options: --country DE (flag shown to clients), --endpoint HOST (public IP/DNS clients use; auto-detected), --port 51820, --uninstall
 set -euo pipefail
 
 PANEL="__PANEL_URL__"
-TOKEN="" NAME="" LOCATION="" ENDPOINT="" PORT="51820" UNINSTALL=0
+TOKEN="" NAME="" LOCATION="" COUNTRY="" ENDPOINT="" PORT="51820" UNINSTALL=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --token) TOKEN="$2"; shift 2 ;;
     --name) NAME="$2"; shift 2 ;;
     --location) LOCATION="$2"; shift 2 ;;
+    --country) COUNTRY="$2"; shift 2 ;;
     --endpoint) ENDPOINT="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
     --panel) PANEL="$2"; shift 2 ;;
@@ -71,6 +72,7 @@ say "Registering with $PANEL"
 args=(enroll --panel "$PANEL" --token "$TOKEN" --port "$PORT")
 [[ -n "$NAME" ]] && args+=(--name "$NAME")
 [[ -n "$LOCATION" ]] && args+=(--location "$LOCATION")
+[[ -n "$COUNTRY" ]] && args+=(--country "$COUNTRY")
 [[ -n "$ENDPOINT" ]] && args+=(--endpoint "$ENDPOINT")
 python3 /opt/vnvpn/agent.py "${args[@]}"
 

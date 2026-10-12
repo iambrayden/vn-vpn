@@ -1,92 +1,248 @@
 {% extends "base.html" %}
 {% block title %}Admin · {{ brand }}{% endblock %}
+{% block page %}admin{% endblock %}
+
+{% macro node_status(n) %}<span class="pill {{ 'on' if n.online else 'off' }}" data-node-status="{{ n.id }}"><span class="dot{{ ' live' if n.online }}"></span>{{ 'Online' if n.online else 'Offline' }}</span>{% endmacro %}
+
 {% block content %}
 {% set online = nodes|selectattr('online')|list %}
-<section class="stats">
-  <div class="card stat"><div class="n">{{ online|length }}/{{ nodes|length }}</div><div class="muted">Servers online</div></div>
-  <div class="card stat"><div class="n">{{ users|length }}</div><div class="muted">Users</div></div>
-  <div class="card stat"><div class="n">{{ nodes|sum(attribute='active_peers') }}</div><div class="muted">Active connections</div></div>
-  <div class="card stat"><div class="n">{{ (nodes|sum(attribute='rx') + nodes|sum(attribute='tx'))|bytes }}</div><div class="muted">Traffic</div></div>
-</section>
+<div class="section-head" style="margin-top:0">
+  <div><h1>Dashboard</h1><span class="muted">Live — refreshes automatically.</span></div>
+  <button class="btn primary" data-open="add-server">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12h14"/></svg>
+    Add server</button>
+</div>
 
-<section id="servers" class="card">
-  <h2>Add a server</h2>
-  <p class="muted">Create an enrollment token, then run the one-liner as root on any fresh Linux VPS (Debian/Ubuntu/RHEL/Alma/Rocky/Alpine).
-    The server installs WireGuard, registers itself and shows up below within seconds.</p>
-  <form class="inline" method="post" action="/admin/tokens">
-    <input name="label" placeholder="Label (e.g. Hetzner fleet)">
-    <input name="max_uses" type="number" min="1" placeholder="Max uses (blank = unlimited)">
-    <button class="btn primary">New token</button>
-  </form>
-  {% for t in tokens %}
-  <div class="token">
-    <div class="token-meta"><b>{{ t.label or 'Token' }}</b> <span class="muted">(click the command to copy)</span>
-      <span class="muted">used {{ t.uses }}{% if t.max_uses %}/{{ t.max_uses }}{% endif %} · {{ t.created_at }}</span>
-      <form method="post" action="/admin/tokens/{{ t.token }}/revoke"><button class="link danger">revoke</button></form>
-    </div>
-    <pre class="cmd" title="Click to copy" onclick="navigator.clipboard.writeText(this.innerText); this.classList.add('copied')">curl -fsSL {{ panel }}/agent/install.sh | sudo bash -s -- --token {{ t.token }} --name "My Server" --location "Germany"</pre>
+<div class="tabs" data-tabs role="tablist">
+  <button data-tab="overview" role="tab">Overview</button>
+  <button data-tab="servers" role="tab">Servers <span class="count">{{ nodes|length }}</span></button>
+  <button data-tab="users" role="tab">Users <span class="count">{{ users|length }}</span></button>
+</div>
+
+<!-- ============================================================ overview -->
+<div data-panel="overview" class="stack">
+  <div class="stats">
+    <div class="card stat"><div class="k">Servers online</div><div class="v" data-k="online">{{ online|length }}/{{ nodes|length }}</div></div>
+    <div class="card stat"><div class="k">Connected right now</div><div class="v" data-k="active">{{ nodes|sum(attribute='active_peers') }}</div></div>
+    <div class="card stat"><div class="k">Customers</div><div class="v">{{ users|selectattr('status', 'equalto', 'active')|list|length }}</div>
+      <div class="muted small">{{ users|selectattr('status', 'equalto', 'suspended')|list|length }} suspended</div></div>
+    <div class="card stat"><div class="k">Total traffic</div><div class="v">{{ (nodes|sum(attribute='rx') + nodes|sum(attribute='tx'))|bytes }}</div></div>
   </div>
-  {% else %}
-  <p class="muted">No active tokens.</p>
-  {% endfor %}
 
-  <h2 class="mt">Servers</h2>
+  <div class="cols-2">
+    <div class="card">
+      <div class="section-head" style="margin:0 0 6px"><h2>Server health</h2><a href="#servers" class="small">Manage →</a></div>
+      {% if nodes %}
+      <ul class="list">
+        {% for n in nodes %}
+        <li><span class="flag" style="font-size:20px;width:26px">{{ n.country|flag }}</span>
+          <span class="grow"><b>{{ n.name }}</b> <span class="muted small">{{ n.location }}</span></span>
+          <span class="muted small"><span data-node-active="{{ n.id }}">{{ n.active_peers }}</span> online</span>
+          {{ node_status(n) }}</li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <div class="empty" style="padding:24px 0"><p>No servers yet.</p><button class="btn primary" data-open="add-server">Add your first server</button></div>
+      {% endif %}
+    </div>
+    <div class="card">
+      <div class="section-head" style="margin:0 0 6px"><h2>Newest customers</h2><a href="#users" class="small">All users →</a></div>
+      <ul class="list">
+        {% for u in users[:6] %}
+        <li><span class="avatar">{{ u.email[0] }}</span><span class="grow">{{ u.email }}</span>
+          <span class="muted small">{{ u.created_at|ago }}</span></li>
+        {% else %}<li class="muted">No users yet.</li>{% endfor %}
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ servers -->
+<div data-panel="servers" hidden>
   {% if nodes %}
-  <div class="table-wrap"><table>
-    <thead><tr><th>#</th><th>Name</th><th>Location</th><th>Endpoint</th><th>Status</th><th>Active</th><th>Traffic</th><th>Agent</th><th></th></tr></thead>
+  <div class="card table-card"><div class="table-wrap"><table>
+    <thead><tr><th>Server</th><th>Status</th><th>Connected</th><th class="hide-sm">Traffic</th><th class="hide-sm">Endpoint</th><th class="hide-sm">Last check-in</th><th></th></tr></thead>
     <tbody>
     {% for n in nodes %}
-    <tr>
-      <td>{{ n.id }}</td>
-      <td><input name="name" form="nf{{ n.id }}" value="{{ n.name }}" required></td>
-      <td><input name="location" form="nf{{ n.id }}" value="{{ n.location }}"></td>
-      <td><input name="endpoint_host" form="nf{{ n.id }}" value="{{ n.endpoint_host }}" required><span class="muted">:{{ n.listen_port }}</span></td>
-      <td><span class="pill {{ 'on' if n.online else 'off' }}">{{ 'online' if n.online else 'offline' }}</span>
-          <label class="chk"><input type="checkbox" name="enabled" form="nf{{ n.id }}" value="1" {{ 'checked' if n.enabled }}> enabled</label></td>
-      <td>{{ n.active_peers }}</td>
-      <td>{{ (n.rx + n.tx)|bytes }}</td>
-      <td class="muted">{{ n.agent_version or '—' }}<br>{{ n.last_seen or 'never' }}</td>
-      <td class="nowrap"><form id="nf{{ n.id }}" method="post" action="/admin/nodes/{{ n.id }}"><button class="btn small">Save</button></form>
-        <form method="post" action="/admin/nodes/{{ n.id }}/delete" onsubmit="return confirm('Remove this server?')"><button class="btn small danger">Delete</button></form></td>
-    </tr>
-    {% endfor %}
-    </tbody>
-  </table></div>
-  {% else %}<p class="muted">No servers yet — run the command above on a VPS.</p>{% endif %}
-</section>
-
-<section id="users" class="card">
-  <h2>Users</h2>
-  <form class="inline" method="post" action="/admin/users">
-    <input name="email" type="email" placeholder="email@example.com" required>
-    <input name="password" placeholder="Password (blank = generate)">
-    <label class="chk"><input type="checkbox" name="is_admin" value="1"> admin</label>
-    <button class="btn primary">Add user</button>
-  </form>
-  <p class="muted">Billing integration: {% if provision_enabled %}provisioning API enabled — see <a href="/api/docs">/api/docs</a>.{% else %}set <code>PROVISION_API_KEY</code> to let WHMCS/Stripe/your site create and suspend users via API.{% endif %}</p>
-  <div class="table-wrap"><table>
-    <thead><tr><th>#</th><th>Email</th><th>Status</th><th>Role</th><th>Traffic</th><th>Last seen</th><th>Joined</th><th></th></tr></thead>
-    <tbody>
-    {% for u in users %}
-    <tr>
-      <td>{{ u.id }}</td><td>{{ u.email }}</td>
-      <td><span class="pill {{ 'on' if u.status == 'active' else 'off' }}">{{ u.status }}</span></td>
-      <td>{{ 'admin' if u.is_admin else 'client' }}</td>
-      <td>{{ u.traffic|bytes }}</td>
-      <td class="muted">{% if u.last_hs %}{{ ((now_ts - u.last_hs) / 60)|int }} min ago{% else %}never{% endif %}</td>
-      <td class="muted">{{ u.created_at[:10] }}</td>
-      <td class="nowrap">
-        {% if u.status == 'active' %}
-        <form method="post" action="/admin/users/{{ u.id }}/suspend"><button class="btn small">Suspend</button></form>
-        {% else %}
-        <form method="post" action="/admin/users/{{ u.id }}/activate"><button class="btn small">Activate</button></form>
-        {% endif %}
-        <form method="post" action="/admin/users/{{ u.id }}/{{ 'demote' if u.is_admin else 'promote' }}"><button class="btn small">{{ 'Demote' if u.is_admin else 'Make admin' }}</button></form>
-        <form method="post" action="/admin/users/{{ u.id }}/delete" onsubmit="return confirm('Delete {{ u.email }}?')"><button class="btn small danger">Delete</button></form>
+    <tr data-node-row="{{ n.id }}">
+      <td><div class="cell-main"><span class="flag">{{ n.country|flag }}</span>
+        <div><b>{{ n.name }}</b>{% if not n.enabled %} <span class="pill warn">Hidden</span>{% endif %}
+          <div class="muted small">{{ n.location or '—' }}</div></div></div></td>
+      <td>{{ node_status(n) }}</td>
+      <td data-node-active="{{ n.id }}">{{ n.active_peers }}</td>
+      <td class="hide-sm" data-node-traffic="{{ n.id }}">{{ (n.rx + n.tx)|bytes }}</td>
+      <td class="hide-sm mono small">{{ n.endpoint_host }}:{{ n.listen_port }}</td>
+      <td class="hide-sm muted small"><span data-node-seen="{{ n.id }}">{{ n.last_seen|ago }}</span>{% if n.agent_version %} · v{{ n.agent_version }}{% endif %}</td>
+      <td class="actions">
+        <button class="btn sm" data-open="edit-node-{{ n.id }}">Edit</button>
+        <details class="menu row-menu"><summary class="btn sm ghost" aria-label="More actions">•••</summary>
+          <div class="menu-pop">
+            <form method="post" action="/admin/nodes/{{ n.id }}/toggle"><button>{{ 'Hide from customers' if n.enabled else 'Show to customers' }}</button></form>
+            <form method="post" action="/admin/nodes/{{ n.id }}/delete" data-confirm="Remove {{ n.name }}? Its agent will stop syncing and customers lose this location." data-confirm-label="Remove server">
+              <button style="color:var(--bad)">Remove server</button></form>
+          </div>
+        </details>
       </td>
     </tr>
     {% endfor %}
     </tbody>
-  </table></div>
-</section>
+  </table></div></div>
+  {% else %}
+  <div class="card empty">
+    <div class="big">🖥️</div>
+    <h2>Add your first VPN server</h2>
+    <p>Any fresh Linux VPS works. Paste one command and it shows up here automatically.</p>
+    <button class="btn primary" data-open="add-server">Add server</button>
+  </div>
+  {% endif %}
+</div>
+
+<!-- ============================================================ users -->
+<div data-panel="users" hidden>
+  <div class="section-head" style="margin-top:0">
+    <div class="toolbar">
+      <label class="search" style="margin:0"><span class="sr-only">Search users</span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        <input type="search" placeholder="Search by email" data-filter="#user-rows"></label>
+      <div class="chips">
+        <button class="chip active" data-chip="" data-chip-for="#user-rows">All</button>
+        <button class="chip" data-chip="active" data-chip-for="#user-rows">Active</button>
+        <button class="chip" data-chip="suspended" data-chip-for="#user-rows">Suspended</button>
+        <button class="chip" data-chip="admin" data-chip-for="#user-rows">Admins</button>
+      </div>
+    </div>
+    <button class="btn" data-open="add-user">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12h14"/></svg>
+      Add user</button>
+  </div>
+  <div class="card table-card"><div class="table-wrap"><table>
+    <thead><tr><th>User</th><th>Status</th><th class="hide-sm">Traffic</th><th class="hide-sm">Last connected</th><th class="hide-sm">Joined</th><th></th></tr></thead>
+    <tbody id="user-rows">
+    {% for u in users %}
+    <tr data-tags="{{ u.status }}{{ ' admin' if u.is_admin }}">
+      <td><div class="cell-main"><span class="avatar">{{ u.email[0] }}</span>
+        <div>{{ u.email }}{% if u.is_admin %} <span class="pill accent">Admin</span>{% endif %}</div></div></td>
+      <td><span class="pill {{ 'on' if u.status == 'active' else 'off' }}">{{ u.status|capitalize }}</span></td>
+      <td class="hide-sm">{{ u.traffic|bytes }}</td>
+      <td class="hide-sm muted">{{ u.last_hs|ago if u.last_hs else 'never' }}</td>
+      <td class="hide-sm muted">{{ u.created_at|ago }}</td>
+      <td class="actions">
+        {% if u.id != user.id %}
+        {% if u.status == 'active' %}
+        <form method="post" action="/admin/users/{{ u.id }}/suspend" data-confirm="Suspend {{ u.email }}? They'll be disconnected from every server within ~15 seconds." data-confirm-label="Suspend"><button class="btn sm">Suspend</button></form>
+        {% else %}
+        <form method="post" action="/admin/users/{{ u.id }}/activate"><button class="btn sm">Reactivate</button></form>
+        {% endif %}
+        <details class="menu row-menu"><summary class="btn sm ghost" aria-label="More actions">•••</summary>
+          <div class="menu-pop">
+            <form method="post" action="/admin/users/{{ u.id }}/{{ 'demote' if u.is_admin else 'promote' }}"><button>{{ 'Remove admin rights' if u.is_admin else 'Make admin' }}</button></form>
+            <form method="post" action="/admin/users/{{ u.id }}/delete" data-confirm="Permanently delete {{ u.email }}? This can't be undone." data-confirm-label="Delete user"><button style="color:var(--bad)">Delete user</button></form>
+          </div>
+        </details>
+        {% else %}<span class="muted small">You</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    <tr data-static="1" data-empty-for="#user-rows" hidden><td colspan="6" class="empty">No users match.</td></tr>
+    </tbody>
+  </table></div></div>
+  <p class="muted small" style="margin-top:14px">
+    {% if provision_enabled %}Billing integration is on — your billing system can create and suspend users via the <a href="/api/docs">provisioning API</a>.
+    {% else %}Tip: set <code>PROVISION_API_KEY</code> to let WHMCS, Stripe or your website create and suspend users automatically.{% endif %}
+  </p>
+</div>
+{% endblock %}
+
+{% block dialogs %}
+<!-- add-server wizard -->
+<dialog id="add-server" class="wide" data-url="{{ panel }}">
+  <div class="dlg-head"><h2>Add a VPN server</h2><button class="btn ghost icon" data-close aria-label="Close">✕</button></div>
+  <div class="dlg-body">
+    <div class="wizard-step">
+      <div class="num">1</div>
+      <div class="body">
+        <h3>Get a fresh Linux server</h3>
+        <p class="muted small" style="margin:0">Any VPS with a public IP — Debian, Ubuntu, Alma, Rocky or Alpine. 1 vCPU / 1 GB is plenty to start. Allow <b>UDP 51820</b> in your provider's firewall.</p>
+      </div>
+    </div>
+    <div class="wizard-step">
+      <div class="num">2</div>
+      <div class="body">
+        <h3>Describe it</h3>
+        <div class="field-row">
+          <label>Display name <input id="wiz-name" placeholder="Frankfurt 1"></label>
+          <label>City / region <input id="wiz-location" placeholder="Frankfurt"></label>
+          <label>Country
+            <select id="wiz-country"><option value="">Choose…</option>
+              {% for code, name in countries|dictsort(by='value') %}<option value="{{ code }}">{{ code|flag }} {{ name }}</option>{% endfor %}
+            </select></label>
+        </div>
+        <label>Enrollment token
+          {% if tokens %}
+          <select id="wiz-token">{% for t in tokens %}<option value="{{ t.token }}">{{ t.label or 'Token' }} · used {{ t.uses }}{% if t.max_uses %}/{{ t.max_uses }}{% endif %}</option>{% endfor %}</select>
+          {% else %}<input id="wiz-token" type="hidden" value=""><span class="hint" style="display:block;margin-top:6px">You don't have a token yet — create one below.</span>{% endif %}
+        </label>
+      </div>
+    </div>
+    <div class="wizard-step">
+      <div class="num">3</div>
+      <div class="body">
+        <h3>Run this on the server as root</h3>
+        <div class="cmd"><code id="wiz-cmd"></code><button class="btn sm" id="wiz-copy" data-copy="#wiz-cmd">Copy</button></div>
+        <div class="waiting" id="wiz-waiting"><span class="spinner"></span>Waiting for a new server to check in… it appears here automatically.</div>
+      </div>
+    </div>
+    <details style="margin-top:6px">
+      <summary class="small muted" style="cursor:pointer">Manage enrollment tokens ({{ tokens|length }})</summary>
+      <form class="toolbar" method="post" action="/admin/tokens" style="margin-top:10px">
+        <input name="label" placeholder="Label, e.g. Hetzner fleet" style="flex:2 1 180px;margin:0">
+        <input name="max_uses" type="number" min="1" placeholder="Max uses (∞)" style="flex:1 1 120px;margin:0">
+        <button class="btn">Create token</button>
+      </form>
+      <ul class="list tokens">
+        {% for t in tokens %}
+        <li><span class="grow"><b>{{ t.label or 'Token' }}</b> <span class="muted small mono">{{ t.token[:8] }}…</span></span>
+          <span class="muted small">used {{ t.uses }}{% if t.max_uses %}/{{ t.max_uses }}{% endif %}</span>
+          <form method="post" action="/admin/tokens/{{ t.token }}/revoke" data-confirm="Revoke this token? Servers already added keep working; it just can't add new ones." data-confirm-label="Revoke"><button class="btn sm danger">Revoke</button></form></li>
+        {% endfor %}
+      </ul>
+    </details>
+  </div>
+</dialog>
+
+<!-- edit server -->
+{% for n in nodes %}
+<dialog id="edit-node-{{ n.id }}">
+  <form method="post" action="/admin/nodes/{{ n.id }}">
+    <div class="dlg-head"><h2>Edit {{ n.name }}</h2><button type="button" class="btn ghost icon" data-close aria-label="Close">✕</button></div>
+    <div class="dlg-body">
+      <label>Display name <input name="name" value="{{ n.name }}" required></label>
+      <div class="field-row">
+        <label>City / region <input name="location" value="{{ n.location }}"></label>
+        <label>Country
+          <select name="country"><option value="">—</option>
+            {% for code, name in countries|dictsort(by='value') %}<option value="{{ code }}" {{ 'selected' if code == n.country }}>{{ code|flag }} {{ name }}</option>{% endfor %}
+          </select></label>
+      </div>
+      <label>Public endpoint <span class="hint">· IP or hostname clients connect to</span><input name="endpoint_host" value="{{ n.endpoint_host }}" required></label>
+      <label class="check" style="margin-top:16px"><input type="checkbox" name="enabled" value="1" {{ 'checked' if n.enabled }}> Visible to customers</label>
+      <p class="muted small" style="margin-top:14px">Host: {{ n.hostname or '—' }} · Port {{ n.listen_port }} · Added {{ n.created_at|ago }}</p>
+    </div>
+    <div class="dlg-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save changes</button></div>
+  </form>
+</dialog>
+{% endfor %}
+
+<!-- add user -->
+<dialog id="add-user">
+  <form method="post" action="/admin/users">
+    <div class="dlg-head"><h2>Add a user</h2><button type="button" class="btn ghost icon" data-close aria-label="Close">✕</button></div>
+    <div class="dlg-body">
+      <label>Email <input name="email" type="email" required></label>
+      <label>Password <span class="hint">· leave blank to generate one</span><input name="password" minlength="8"></label>
+      <label class="check" style="margin-top:16px"><input type="checkbox" name="is_admin" value="1"> Admin access</label>
+    </div>
+    <div class="dlg-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create user</button></div>
+  </form>
+</dialog>
 {% endblock %}

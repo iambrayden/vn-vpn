@@ -1,4 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="card auth"><h1>{{ code }}</h1><p>{{ detail }}</p><a class="btn" href="/">Back</a></div>
+<div class="auth-wrap">
+  <div class="card auth empty">
+    <div class="big">{{ '🔒' if code in (401, 403) else '🧭' }}</div>
+    <h1>{{ {404: "Page not found", 403: "Access denied"}.get(code, "Something went wrong") }}</h1>
+    <p class="muted">{{ detail }}</p>
+    <a class="btn primary" href="/">Go home</a>
+  </div>
+</div>
 {% endblock %}

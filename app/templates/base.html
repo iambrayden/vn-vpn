@@ -3,24 +3,50 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>{% block title %}{{ brand }}{% endblock %}</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect width='24' height='24' rx='6' fill='%232563eb'/><path d='M12 5l6 2.5v4.2c0 3.6-2.5 6.3-6 7.3-3.5-1-6-3.7-6-7.3V7.5z' fill='white'/></svg>">
+  <link rel="stylesheet" href="/static/style.css?v=3">
 </head>
-<body>
+<body data-page="{% block page %}{% endblock %}">
 <header class="topbar">
-  <a class="logo" href="/"><span class="dot"></span>{{ brand }}</a>
-  {% if user %}
-  <nav>
-    <a href="/portal">My VPN</a>
-    {% if user.is_admin %}<a href="/admin">Admin</a>{% endif %}
-    <span class="muted">{{ user.email }}</span>
-    <form method="post" action="/logout"><button class="link">Log out</button></form>
-  </nav>
-  {% endif %}
+  <div class="topbar-inner">
+    <a class="logo" href="/">
+      <span class="logo-mark"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l8 3.3v5.6c0 4.8-3.3 8.4-8 9.7-4.7-1.3-8-4.9-8-9.7V5.3z"/></svg></span>
+      {{ brand }}
+    </a>
+    {% if user %}
+    <nav class="nav">
+      {% if user.is_admin %}<a href="/admin" class="{{ 'active' if request.url.path.startswith('/admin') }}">Admin</a>{% endif %}
+      <a href="/portal" class="{{ 'active' if request.url.path.startswith('/portal') }}">{{ 'My VPN' if user.is_admin else 'Servers' }}</a>
+    </nav>
+    <details class="menu">
+      <summary aria-label="Account menu"><span class="avatar">{{ user.email[0] }}</span></summary>
+      <div class="menu-pop">
+        <div class="who"><div class="muted small">Signed in as</div>{{ user.email }}</div>
+        <a href="/portal#account">Account settings</a>
+        <form method="post" action="/logout"><button>Log out</button></form>
+      </div>
+    </details>
+    {% endif %}
+  </div>
 </header>
 <main>
-  {% for kind, msg in flashes %}<div class="flash {{ kind }}">{{ msg }}</div>{% endfor %}
   {% block content %}{% endblock %}
 </main>
+
+<div id="toasts" aria-live="polite">
+  {% for kind, msg in flashes %}
+  <div class="toast {{ kind }}{{ ' sticky' if kind == 'info' }}" role="status"><span>{{ msg }}</span><button class="x" aria-label="Dismiss">×</button></div>
+  {% endfor %}
+</div>
+
+<dialog id="confirm-dialog">
+  <div class="dlg-head"><h2>Are you sure?</h2><button class="btn ghost icon" data-close aria-label="Close">✕</button></div>
+  <div class="dlg-body"><p id="confirm-text" style="margin-top:14px"></p></div>
+  <div class="dlg-foot"><button class="btn" data-close>Cancel</button><button class="btn danger solid" id="confirm-ok">Confirm</button></div>
+</dialog>
+{% block dialogs %}{% endblock %}
+<script src="/static/app.js?v=3"></script>
 </body>
 </html>
