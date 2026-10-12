@@ -168,11 +168,36 @@
       });
       $$('[data-k=device-name]').forEach(el => (el.textContent = name));
     };
+    let lastPick = pick?.value;
     pick?.addEventListener('change', () => {
+      if (pick.value === 'new') { pick.value = lastPick; $('#add-device')?.showModal(); return; }
+      lastPick = pick.value;
       applyDevice();
       const u = new URL(location.href); u.searchParams.set('device', pick.value); history.replaceState(null, '', u);
     });
     applyDevice();
+    // Warn before giving a device's config for a location it already has (likely a second machine)
+    const downloaded = JSON.parse($('#locations')?.dataset.downloaded || '{}');
+    let pendingConfig = null;
+    document.addEventListener('click', e => {
+      const el = e.target.closest('[data-config-node]');
+      if (!el || !pick || el.dataset.confirmed) return;
+      const done = downloaded[pick.value] || [];
+      if (!done.includes(+el.dataset.configNode)) {
+        done.push(+el.dataset.configNode); downloaded[pick.value] = done;  // first time: fine
+        return;
+      }
+      e.preventDefault(); e.stopImmediatePropagation();
+      pendingConfig = el;
+      $('[data-k=dup-device]').textContent = pick.selectedOptions[0].textContent;
+      $('#dup-config').showModal();
+    }, true);
+    $('#dup-continue')?.addEventListener('click', () => {
+      $('#dup-config').close();
+      if (!pendingConfig) return;
+      pendingConfig.dataset.confirmed = '1'; pendingConfig.click(); delete pendingConfig.dataset.confirmed;
+    });
+
     // Suggest a device name from the browser
     const nameInput = $('#device-name');
     if (nameInput) nameInput.value = { ios: 'iPhone', android: 'Android phone', windows: 'Windows PC', macos: 'Mac', linux: 'Linux PC' }[os] || '';

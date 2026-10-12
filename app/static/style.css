@@ -376,3 +376,4 @@ figure.chart-card h3 { margin: 0; }
 .bar { display: block; height: 8px; border-radius: 4px; background: var(--grid); overflow: hidden; }
 .bar > i { display: block; height: 100%; border-radius: 4px; background: var(--series-1); }
 a.chip { text-decoration: none; display: inline-block; }
+.link-btn { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); text-decoration: underline; cursor: pointer; }

@@ -56,6 +56,14 @@ CREATE TABLE IF NOT EXISTS devices (
     created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Which locations a device has downloaded (to warn before handing the same config to a second machine).
+CREATE TABLE IF NOT EXISTS device_downloads (
+    device_id  INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    node_id    INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    first_at   INTEGER NOT NULL,
+    PRIMARY KEY (device_id, node_id)
+);
+
 CREATE TABLE IF NOT EXISTS device_stats (
     device_id      INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
     node_id        INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
@@ -189,6 +197,11 @@ MIGRATIONS = [
     ("enroll_tokens", "node_id", "INTEGER"),                        # set = one-time re-enroll for that server
     ("enroll_tokens", "expires_at", "INTEGER"),                     # unix time; NULL = never
     ("nodes", "slot", "INTEGER"),                                   # which /16 of VPN_POOL the server uses
+    # one config used on two machines at once: the server sees the peer's address flip back and forth
+    ("devices", "last_ip", "TEXT NOT NULL DEFAULT ''"),
+    ("devices", "ip_changed_at", "INTEGER NOT NULL DEFAULT 0"),
+    ("devices", "ip_flips", "INTEGER NOT NULL DEFAULT 0"),
+    ("devices", "shared_at", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

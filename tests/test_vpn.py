@@ -263,3 +263,47 @@ def test_server_ranges_are_reused_after_removal(client):
     add_node(client, "C")
     with db.session() as conn:
         assert conn.execute("SELECT slot FROM nodes WHERE name = 'C'").fetchone()[0] == 0
+
+
+def _peer(dev, ip):
+    return {"public_key": dev["public_key"], "handshake": int(time.time()) - 3, "rx": 1, "tx": 1,
+            "endpoint": f"{ip}:5555"}
+
+
+def test_one_config_on_two_machines_is_flagged(client):
+    secret = add_node(client, "CHI1")
+    signup(client)
+    grant("cust@example.com", "pro")
+    client.get("/portal")
+    dev = devices_of("cust@example.com")[0]
+    for ip in ["45.1.1.1", "66.2.2.2", "45.1.1.1", "66.2.2.2"]:   # WireGuard follows whichever machine spoke last
+        sync(client, secret, [_peer(dev, ip)])
+    with db.session() as conn:
+        assert conn.execute("SELECT shared_at FROM devices WHERE id = ?", (dev["id"],)).fetchone()[0] > 0
+    assert "this config is being used on two machines at once" in client.get("/portal").text
+
+
+def test_changing_network_once_is_not_flagged(client):
+    secret = add_node(client, "CHI1")
+    signup(client)
+    grant("cust@example.com", "pro")
+    client.get("/portal")
+    dev = devices_of("cust@example.com")[0]
+    for ip in ["45.1.1.1", "45.1.1.1", "66.2.2.2", "66.2.2.2"]:   # Wi-Fi -> mobile data
+        sync(client, secret, [_peer(dev, ip)])
+    with db.session() as conn:
+        assert conn.execute("SELECT shared_at FROM devices WHERE id = ?", (dev["id"],)).fetchone()[0] == 0
+    assert "being used on two machines at once" not in client.get("/portal").text
+
+
+def test_downloads_are_remembered_per_device_and_location(client):
+    add_node(client, "CHI1")
+    add_node(client, "STL1")
+    signup(client)
+    grant("cust@example.com", "pro")
+    client.get("/portal")
+    dev = devices_of("cust@example.com")[0]
+    client.get(f"/portal/config/2.conf?device={dev['id']}")
+    page = client.get("/portal").text
+    assert f"data-downloaded='{{&#34;{dev['id']}&#34;: [2]}}'" in page or f'"{dev["id"]}": [2]' in page
+    assert "New device…" in page and "Setting up another phone or computer?" in page

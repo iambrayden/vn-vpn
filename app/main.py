@@ -362,6 +362,9 @@ def user_devices(conn, user):
         d["node_name"] = nodes.get(d["node_id"], "") if last else ""
         d["down"], d["up"] = (last["tx_bytes"], last["rx_bytes"]) if last else (0, 0)
         d["kicked"] = d["kicked_until"] > now
+        d["shared"] = now - d["shared_at"] < 3600
+        d["downloaded"] = [r[0] for r in conn.execute(
+            "SELECT node_id FROM device_downloads WHERE device_id = ?", (d["id"],))]
         d["blocked"] = not d["kicked"] and d["id"] not in allowed  # waiting for a free slot
     return devices
 
@@ -462,6 +465,7 @@ def portal(request: Request):
         usage = user_usage(conn, user["id"], period if period in USAGE_PERIODS else "month")
     connected = [d for d in devices if d["connected"]]
     return render(request, "portal.html", nodes=nodes, devices=devices, connected=connected, usage=usage,
+                  downloaded_map={str(d["id"]): d["downloaded"] for d in devices},
                   usage_periods=USAGE_PERIODS,
                   ever_connected=any(d["last_handshake"] for d in devices), max_devices=billing.MAX_DEVICES,
                   **plan_context(user))
@@ -585,9 +589,16 @@ def _conf_name(node) -> str:
     return slug[:15]  # WireGuard interface names are limited to 15 chars
 
 
+def _mark_downloaded(device_id: int, node_ids):
+    with db.session() as conn:
+        conn.executemany("INSERT OR IGNORE INTO device_downloads (device_id, node_id, first_at) VALUES (?,?,?)",
+                         [(device_id, n, int(time.time())) for n in node_ids])
+
+
 @app.get("/portal/config/{node_id}.conf")
 def download_config(request: Request, node_id: int, device: int):
     user, dev, node = _device_node(request, node_id, device)
+    _mark_downloaded(dev["id"], [node["id"]])
     return PlainTextResponse(
         crypto.client_config(dev, node, user["email"]),
         headers={"Content-Disposition": f'attachment; filename="{_conf_name(node)}.conf"'},
@@ -597,6 +608,7 @@ def download_config(request: Request, node_id: int, device: int):
 @app.get("/portal/qr/{node_id}.svg")
 def config_qr(request: Request, node_id: int, device: int):
     user, dev, node = _device_node(request, node_id, device)
+    _mark_downloaded(dev["id"], [node["id"]])
     img = qrcode.make(crypto.client_config(dev, node, user["email"]), image_factory=qrcode.image.svg.SvgPathImage,
                       box_size=8, border=2)
     buf = io.BytesIO()
@@ -619,6 +631,7 @@ def download_all(request: Request, device: int):
                 name = f"{name[:11]}-{n['id']}"[:15]
             used.add(name)
             zf.writestr(f"{name}.conf", crypto.client_config(dev, n, user["email"]))
+    _mark_downloaded(dev["id"], [n["id"] for n in nodes])
     fname = re.sub(r"[^A-Za-z0-9_.-]+", "-", f"{BRAND}-{dev['name']}")
     return Response(buf.getvalue(), media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{fname}.zip"'})
@@ -1100,6 +1113,21 @@ def agent_whoami(request: Request):
     return {"ip": client_ip_of(request)}
 
 
+SHARED_FLIPS = 3          # address changes ...
+SHARED_WINDOW = 300       # ... each within this many seconds of the previous one = two machines, one config
+
+
+def _track_endpoint(conn, d, ip: str, now: int):
+    """WireGuard keeps one endpoint per peer and follows whichever machine spoke last, so a config used on two
+    machines makes the address flip back and forth. A phone moving Wi-Fi -> 4G changes it once or twice."""
+    if ip == d["last_ip"]:
+        return
+    flips = d["ip_flips"] + 1 if d["last_ip"] and now - d["ip_changed_at"] < SHARED_WINDOW else 0
+    conn.execute("""UPDATE devices SET last_ip = ?, ip_changed_at = ?, ip_flips = ?,
+                    shared_at = CASE WHEN ? >= ? THEN ? ELSE shared_at END WHERE id = ?""",
+                 (ip, now, flips, flips, SHARED_FLIPS, now, d["id"]))
+
+
 def _new_slot(conn) -> int:
     try:
         return crypto.allocate_slot(conn)
@@ -1194,7 +1222,8 @@ def agent_sync(request: Request, body: dict = Depends(json_body), authorization:
     now = int(time.time())
     with db.session() as conn:
         devices = {d["public_key"]: d for d in conn.execute(
-            """SELECT d.id, d.user_id, d.name, d.public_key, d.address, d.last_handshake, d.active_since, u.email
+            """SELECT d.id, d.user_id, d.name, d.public_key, d.address, d.last_handshake, d.active_since, u.email,
+                      d.last_ip, d.ip_changed_at, d.ip_flips
                FROM devices d JOIN users u ON u.id = d.user_id""")}
         prev = {r["device_id"]: r for r in conn.execute(
             "SELECT device_id, rx_bytes, tx_bytes FROM device_stats WHERE node_id = ?", (node["id"],))}
@@ -1224,6 +1253,9 @@ def agent_sync(request: Request, body: dict = Depends(json_body), authorization:
                     rx_bytes = excluded.rx_bytes, tx_bytes = excluded.tx_bytes,
                     last_handshake = excluded.last_handshake""",
                 (d["id"], node["id"], rx, tx, hs))
+            ip = str(p.get("endpoint") or "").rsplit(":", 1)[0].strip("[]")
+            if ip and now - hs < ACTIVE_WINDOW:
+                _track_endpoint(conn, d, ip, now)
             if hs > d["last_handshake"]:
                 # a handshake after an idle gap starts a new session
                 new_session = now - d["last_handshake"] >= ACTIVE_WINDOW or not d["active_since"]
