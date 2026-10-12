@@ -36,7 +36,10 @@ def _secret_key() -> str:
 
 
 SECRET_KEY = _secret_key()
-PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "").strip().rstrip("/")
+# Coolify's SERVICE_FQDN_* is a bare domain ("vpn.example.com"); assume HTTPS when no scheme is given.
+if PUBLIC_URL and "://" not in PUBLIC_URL:
+    PUBLIC_URL = "https://" + PUBLIC_URL
 BRAND = os.environ.get("BRAND_NAME", "VN-VPN")
 OPEN_SIGNUP = os.environ.get("OPEN_SIGNUP", "true").lower() in ("1", "true", "yes")
 PROVISION_API_KEY = os.environ.get("PROVISION_API_KEY", "")

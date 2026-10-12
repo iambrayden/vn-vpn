@@ -69,7 +69,9 @@ def default_iface():
 # --------------------------------------------------------------------------- enroll
 
 def enroll(args):
-    panel = args.panel.rstrip("/")
+    panel = args.panel.strip().rstrip("/")
+    if "://" not in panel:
+        panel = "https://" + panel
     endpoint = args.endpoint
     if not endpoint:
         endpoint = http("GET", f"{panel}/api/agent/whoami")["ip"]
