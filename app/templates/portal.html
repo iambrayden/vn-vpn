@@ -20,7 +20,7 @@
     <p class="muted" data-k="hero-sub" style="margin:0">{% if connected %}{{ connected|map(attribute='name')|join(', ') }} {{ 'is' if connected|length == 1 else 'are' }} encrypted and routed through the VPN.{% else %}Turn on a tunnel in the WireGuard app to get protected.{% endif %}</p>
   </div>
   <div class="hero-meta">
-    <div><div class="k">Connections</div><div class="v"><span data-k="in-use">{{ connected|length }}</span> of {{ limit }}</div></div>
+    <div><div class="k">Connections</div><div class="v"><span data-k="in-use">{{ connected|length }}</span> of {{ limit_text }}</div></div>
     <div><div class="k">Downloaded</div><div class="v" data-k="down">{{ (connected|sum(attribute='down'))|bytes if connected else '—' }}</div></div>
     <div><div class="k">Uploaded</div><div class="v" data-k="up">{{ (connected|sum(attribute='up'))|bytes if connected else '—' }}</div></div>
   </div>
@@ -29,7 +29,7 @@
 <div class="card notice warn" id="limit-notice" {{ 'hidden' if not blocked }}>
   <div>
     <b>All your connections are in use.</b>
-    Your plan allows {{ limit }} device{{ 's' if limit != 1 }} at a time and
+    Your plan allows {{ limit_text }} device{{ 's' if limit != 1 }} at a time and
     <span data-k="busy-names">{{ connected|map(attribute='name')|join(', ') }}</span> {{ 'is' if connected|length == 1 else 'are' }} connected,
     so your other devices can't connect right now. Disconnect one below to switch{% if plan_key == 'basic' and billing_enabled %},
     or upgrade to {{ plans.pro.name }} for {{ plans.pro.devices }} at a time{% endif %}.
@@ -76,7 +76,7 @@
 <section id="devices">
   <div class="section-head">
     <div><h2>Your devices</h2>
-      <span class="muted small">Add as many as you like · {{ limit }} can be connected at a time{% if plan %} on {{ plan.name }}{% endif %}</span></div>
+      <span class="muted small">Add as many as you like · {{ limit_text }} can be connected at a time{% if plan %} on {{ plan.name }}{% endif %}</span></div>
     {% if not max_devices or devices|length < max_devices %}
     <button class="btn" data-open="add-device">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12h14"/></svg>
@@ -122,7 +122,7 @@
 </section>
 
 <!-- servers -->
-<section id="locations" data-downloaded='{{ downloaded_map|tojson }}'>
+<section id="locations" data-downloaded='{{ downloaded_map|tojson }}' data-device-nodes='{{ device_nodes|tojson }}'>
   <div class="section-head">
     <div><h2>Locations</h2><span class="muted small">{{ nodes|selectattr('online')|list|length }} of {{ nodes|length }} online</span></div>
     {% if nodes %}
@@ -150,7 +150,9 @@
   {% else %}
   <div class="servers" id="server-list">
     {% for n in nodes %}
-    <article class="card server{{ ' is-connected' if n.connected }}{{ ' is-offline' if not n.online }}" data-node="{{ n.id }}">
+    {% set here = n.id in selected.node_ids %}
+    {% set others = n.here|rejectattr('id', 'equalto', selected.id)|map(attribute='name')|list %}
+    <article class="card server{{ ' is-connected' if here }}{{ ' is-offline' if not n.online }}" data-node="{{ n.id }}" data-online="{{ 1 if n.online else 0 }}">
       {% if n.recommended %}<span class="ribbon">★ Recommended</span>{% endif %}
       <div class="server-top">
         <div class="flag" aria-hidden="true">{{ n.country|flag }}</div>
@@ -159,11 +161,12 @@
           <div class="server-sub">{{ n.location }}{% if n.location and n.country_name and n.location != n.country_name %}, {% endif %}{{ n.country_name if n.country_name != n.location }}</div>
         </div>
         <div class="server-badges">
-          {% if n.connected %}<span class="pill on" data-k="status"><span class="dot live"></span>Connected</span>
+          {% if here %}<span class="pill on" data-k="status"><span class="dot live"></span>Connected</span>
           {% elif n.online %}<span class="pill neutral" data-k="status">Online</span>
           {% else %}<span class="pill off" data-k="status">Offline</span>{% endif %}
         </div>
       </div>
+      <div class="also small muted" data-k="also"{{ ' hidden' if not others }}>{% if others %}● {{ others|join(', ') }} {{ 'is' if others|length == 1 else 'are' }} connected here{% endif %}</div>
       <div class="load" title="Current server load">
         <span class="meter{{ ' high' if n.load >= 80 else ' mid' if n.load >= 50 }}"><i style="width: {{ [n.load, 4]|max }}%"></i></span>
         <span data-k="load">{{ load_label(n.load) }}</span>
@@ -229,7 +232,7 @@
         {% elif plan %}<span class="pill on">Active</span>{% endif %}
       </div>
       <ul class="perks" style="margin-top:10px">
-        <li>{{ limit }} device{{ 's' if limit != 1 }} connected at a time</li>
+        <li>{{ limit_text }} device{{ 's' if limit != 1 }} connected at a time</li>
         <li>All {{ nodes|length }} location{{ 's' if nodes|length != 1 }}</li>
         {% if user.plan_source == 'stripe' and renews %}<li>{{ 'Access until' if user.cancel_at_period_end else 'Renews' }} {{ renews }}{% if price_labels[plan_key] %} · {{ price_labels[plan_key] }}{% endif %}</li>{% endif %}
       </ul>
@@ -245,6 +248,13 @@
         {% endif %}
       </div>
     </div>
+    <form class="card" method="post" action="/account/email">
+      <h3>Login email</h3>
+      <p class="muted small" style="margin:0">Currently {{ user.email }}. Receipts from billing go here too.</p>
+      <label>New email <input type="email" name="email" autocomplete="email" required></label>
+      <label>Current password <span class="pw"><input type="password" name="password" autocomplete="current-password" required><button type="button" class="btn ghost" data-reveal>Show</button></span></label>
+      <button class="btn" style="margin-top:16px">Change email</button>
+    </form>
     <form class="card" method="post" action="/account/password">
       <h3>Change password</h3>
       <p class="muted small" style="margin:0">Signed in as {{ user.email }}</p>
@@ -293,7 +303,7 @@
     <div class="dlg-body">
       <p class="muted small" style="margin-top:14px">Add one device per phone or computer — not per location: each device can use every location.
         Each device gets its own key, so you can remove one (if it's lost) without touching the others.
-        Add as many devices as you like; {{ limit }} can be connected at the same time.</p>
+        Add as many devices as you like; {{ limit_text }} can be connected at the same time.</p>
       <label>Device name <input name="name" id="device-name" maxlength="40" placeholder="e.g. Sam's iPhone" required></label>
     </div>
     <div class="dlg-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add device</button></div>

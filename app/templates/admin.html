@@ -42,7 +42,7 @@
     <div class="card stat"><div class="k">Servers online</div><div class="v" data-k="online">{{ online|length }}/{{ nodes|length }}</div></div>
     <div class="card stat"><div class="k">Connected right now</div><div class="v" data-k="active">{{ nodes|sum(attribute='active_peers') }}</div></div>
     <div class="card stat"><div class="k">Subscribers</div><div class="v">{{ paying|length }}</div>
-      <div class="muted small">{% for key, p in plans.items() %}{{ p.name }}: {{ paying|selectattr('plan', 'equalto', key)|list|length }}{{ ' · ' if not loop.last }}{% endfor %}
+      <div class="muted small">{% for key, p in all_plans.items() %}{{ p.name }}: {{ paying|selectattr('plan', 'equalto', key)|list|length }}{{ ' · ' if not loop.last }}{% endfor %}
         · {{ users|length - paying|length - users|selectattr('is_admin')|list|length }} not subscribed</div></div>
     <div class="card stat"><div class="k">Total traffic</div><div class="v">{{ (nodes|sum(attribute='rx') + nodes|sum(attribute='tx'))|bytes }}</div></div>
   </div>
@@ -160,7 +160,7 @@
       <td><div class="cell-main"><span class="avatar">{{ u.email[0] }}</span>
         <div>{{ u.email }}{% if u.is_admin %} <span class="pill accent">Admin</span>{% endif %}
           <div class="muted small">Joined {{ u.created_at|ago }}</div></div></div></td>
-      <td>{% if u.plan in plans %}<b>{{ plans[u.plan].name }}</b>
+      <td>{% if u.plan in all_plans %}<b>{{ all_plans[u.plan].name }}</b>
             <div class="muted small">{% if u.plan_source == 'manual' %}Complimentary{% elif u.cancel_at_period_end %}Cancelling{% else %}{{ u.sub_status|replace('_', ' ')|capitalize or 'Stripe' }}{% endif %}</div>
           {% elif u.is_admin %}<span class="muted">Admin</span>
           {% else %}<span class="muted">None</span>{% if u.sub_status == 'canceled' %}<div class="muted small">Cancelled</div>{% endif %}{% endif %}</td>
@@ -178,11 +178,12 @@
         <details class="menu row-menu"><summary class="btn sm ghost" aria-label="More actions">•••</summary>
           <div class="menu-pop">
             {% if not (u.plan_source == 'stripe' and u.access) %}
-            {% for key, p in plans.items() if not (u.plan == key and u.plan_source == 'manual') %}
+            {% for key, p in all_plans.items() if not (u.plan == key and u.plan_source == 'manual') %}
             <form method="post" action="/admin/users/{{ u.id }}/plan"><input type="hidden" name="plan" value="{{ key }}"><button>Give {{ p.name }} free</button></form>
             {% endfor %}
             {% if u.plan_source == 'manual' %}<form method="post" action="/admin/users/{{ u.id }}/plan"><input type="hidden" name="plan" value=""><button>Remove free plan</button></form>{% endif %}
             {% endif %}
+            <button type="button" data-open="email-{{ u.id }}">Change email…</button>
             <form method="post" action="/admin/users/{{ u.id }}/{{ 'demote' if u.is_admin else 'promote' }}"><button>{{ 'Remove admin rights' if u.is_admin else 'Make admin' }}</button></form>
             <form method="post" action="/admin/users/{{ u.id }}/delete" data-confirm="Permanently delete {{ u.email }}? This can't be undone." data-confirm-label="Delete user"><button style="color:var(--bad)">Delete user</button></form>
           </div>
@@ -281,6 +282,20 @@
 </dialog>
 {% endfor %}
 
+<!-- change a user's email -->
+{% for u in users %}
+<dialog id="email-{{ u.id }}">
+  <form method="post" action="/admin/users/{{ u.id }}/email">
+    <div class="dlg-head"><h2>Change email</h2><button type="button" class="btn ghost icon" data-close aria-label="Close">✕</button></div>
+    <div class="dlg-body">
+      <p class="muted small" style="margin-top:14px">Currently {{ u.email }}. They'll log in with the new address; their password stays the same.</p>
+      <label>New email <input type="email" name="email" value="{{ u.email }}" required></label>
+    </div>
+    <div class="dlg-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
+  </form>
+</dialog>
+{% endfor %}
+
 <!-- add user -->
 <dialog id="add-user">
   <form method="post" action="/admin/users">
@@ -290,7 +305,7 @@
       <label>Password <span class="hint">· leave blank to generate one</span><input name="password" minlength="8"></label>
       <label>Plan <span class="hint">· granted free, no payment needed</span>
         <select name="plan"><option value="">None — they'll choose and pay themselves</option>
-          {% for key, p in plans.items() %}<option value="{{ key }}">{{ p.name }} ({{ p.devices }} device{{ 's' if p.devices != 1 }} at a time)</option>{% endfor %}
+          {% for key, p in all_plans.items() %}<option value="{{ key }}">{{ p.name }} ({{ limit_label(p.devices) }} device{{ 's' if p.devices != 1 }} at a time{{ ', admin-only' if p.internal }})</option>{% endfor %}
         </select></label>
       <label class="check" style="margin-top:16px"><input type="checkbox" name="is_admin" value="1"> Admin access</label>
     </div>

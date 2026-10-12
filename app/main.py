@@ -127,7 +127,9 @@ templates.env.filters["bytes"] = human_bytes
 templates.env.filters["ago"] = ago
 templates.env.filters["flag"] = countries.flag
 templates.env.globals["countries"] = countries.COUNTRIES
-templates.env.globals["plans"] = billing.PLANS
+templates.env.globals["plans"] = billing.PLANS            # public plans (pricing pages)
+templates.env.globals["all_plans"] = billing.ALL_PLANS    # incl. admin-only plans
+templates.env.globals["limit_label"] = billing.limit_label
 
 
 def _asset_version(name: str) -> str:
@@ -179,8 +181,8 @@ def create_user(conn, email: str, password: str, is_admin=False, plan=""):
         raise ValueError("Password must be at least 8 characters.")
     if conn.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone():
         raise ValueError("An account with that email already exists.")
-    if plan and plan not in billing.PLANS:
-        raise ValueError(f"Unknown plan '{plan}'. Use one of: {', '.join(billing.PLANS)}.")
+    if plan and plan not in billing.ALL_PLANS:
+        raise ValueError(f"Unknown plan '{plan}'. Use one of: {', '.join(billing.ALL_PLANS)}.")
     # users.private_key/public_key predate per-device keys; still filled because the columns are NOT NULL
     priv, pub = crypto.wg_keypair()
     cur = conn.execute(
@@ -256,7 +258,8 @@ async def startup():
             row = conn.execute("SELECT id FROM users WHERE email = ?", (admin_email.lower(),)).fetchone()
             if row:
                 conn.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (row["id"],))
-            else:
+            elif not conn.execute("SELECT 1 FROM users WHERE is_admin = 1").fetchone():
+                # bootstrap only: once an admin exists (possibly renamed), don't recreate ADMIN_EMAIL
                 create_user(conn, admin_email, admin_password, is_admin=True)
 
 
@@ -411,7 +414,8 @@ def portal_nodes(conn, devices):
         "SELECT node_id, COUNT(*) n FROM device_stats WHERE last_handshake > ? GROUP BY node_id",
         (now - ACTIVE_WINDOW,))}
     for n in nodes:
-        n["devices_here"] = [d["name"] for d in devices if d["connected"] and n["id"] in d["node_ids"]]
+        n["here"] = [{"id": d["id"], "name": d["name"]} for d in devices if d["connected"] and n["id"] in d["node_ids"]]
+        n["devices_here"] = [d["name"] for d in n["here"]]
         n["connected"] = bool(n["devices_here"])
         n["load"] = min(100, round(100 * active.get(n["id"], 0) / NODE_CAPACITY))
         n["country_name"] = countries.COUNTRIES.get(n["country"], "")
@@ -424,9 +428,10 @@ def portal_nodes(conn, devices):
 
 
 def plan_context(user):
-    plan = billing.PLANS.get(user["plan"])
+    plan = billing.ALL_PLANS.get(user["plan"])
+    limit = billing.device_limit(user)
     return {
-        "plan": plan, "plan_key": user["plan"], "limit": billing.device_limit(user),
+        "plan": plan, "plan_key": user["plan"], "limit": limit, "limit_text": billing.limit_label(limit),
         "renews": datetime.fromtimestamp(user["period_end"], timezone.utc).strftime("%b %-d, %Y")
         if user["period_end"] else "",
         "billing_enabled": billing.enabled(),
@@ -471,6 +476,7 @@ def portal(request: Request):
     connected = [d for d in devices if d["connected"]]
     return render(request, "portal.html", nodes=nodes, devices=devices, connected=connected, usage=usage,
                   downloaded_map={str(d["id"]): d["downloaded"] for d in devices},
+                  device_nodes={str(d["id"]): {"name": d["name"], "nodes": d["node_ids"]} for d in devices},
                   usage_periods=USAGE_PERIODS,
                   ever_connected=any(d["last_handshake"] for d in devices), max_devices=billing.MAX_DEVICES,
                   **plan_context(user))
@@ -494,6 +500,37 @@ def portal_status(request: Request):
                     for d in devices],
         "nodes": [{k: n[k] for k in ("id", "name", "online", "connected", "devices_here", "load")} for n in nodes],
     }
+
+
+def change_email(conn, user, new_email: str) -> str:
+    """Change a user's login email (also in Stripe and in the logs). Returns the normalized email."""
+    new_email = new_email.strip().lower()
+    if not EMAIL_RE.match(new_email):
+        raise ValueError("Please enter a valid email address.")
+    if new_email == user["email"]:
+        return new_email
+    if conn.execute("SELECT 1 FROM users WHERE email = ? AND id != ?", (new_email, user["id"])).fetchone():
+        raise ValueError("Another account already uses that email.")
+    conn.execute("UPDATE users SET email = ? WHERE id = ?", (new_email, user["id"]))
+    for table in ("sessions", "flow_log"):  # keep the traffic log searchable under the new address
+        conn.execute(f"UPDATE {table} SET user_email = ? WHERE user_email = ?", (new_email, user["email"]))
+    billing.update_customer_email(user, new_email)
+    return new_email
+
+
+@app.post("/account/email")
+def account_email(request: Request, email: str = Form(...), password: str = Form(...)):
+    user = require_user(request)
+    if not crypto.verify_password(password, user["password_hash"]):
+        flash(request, "Your password is incorrect.", "error")
+        return RedirectResponse("/portal#account", status_code=303)
+    try:
+        with db.session() as conn:
+            new = change_email(conn, user, email)
+        flash(request, f"Your login email is now {new}.")
+    except ValueError as e:
+        flash(request, str(e), "error")
+    return RedirectResponse("/portal#account", status_code=303)
 
 
 @app.post("/account/password")
@@ -972,11 +1009,26 @@ def admin_create_user(request: Request, email: str = Form(...), password: str = 
     return RedirectResponse("/admin#users", status_code=303)
 
 
+@app.post("/admin/users/{user_id}/email")
+def admin_user_email(request: Request, user_id: int, email: str = Form(...)):
+    require_admin(request)
+    try:
+        with db.session() as conn:
+            u = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            if not u:
+                raise HTTPException(404, "User not found")
+            new = change_email(conn, u, email)
+        flash(request, f"Email changed to {new}.")
+    except ValueError as e:
+        flash(request, str(e), "error")
+    return RedirectResponse("/admin#users", status_code=303)
+
+
 @app.post("/admin/users/{user_id}/plan")
 def admin_set_plan(request: Request, user_id: int, plan: str = Form("")):
     """Grant a plan without Stripe (friends, testing, invoices paid elsewhere) or remove a manual grant."""
     require_admin(request)
-    if plan and plan not in billing.PLANS:
+    if plan and plan not in billing.ALL_PLANS:
         raise HTTPException(400, "Unknown plan")
     with db.session() as conn:
         u = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
@@ -986,7 +1038,7 @@ def admin_set_plan(request: Request, user_id: int, plan: str = Form("")):
             return RedirectResponse("/admin#users", status_code=303)
         conn.execute("UPDATE users SET plan = ?, plan_source = ? WHERE id = ?",
                      (plan, "manual" if plan else "", user_id))
-    flash(request, f"Granted {billing.PLANS[plan]['name']} (free)." if plan else "Plan removed.")
+    flash(request, f"Granted {billing.ALL_PLANS[plan]['name']} (free)." if plan else "Plan removed.")
     return RedirectResponse("/admin#users", status_code=303)
 
 
@@ -1060,8 +1112,8 @@ def api_set_plan(ident: str, body: dict = Depends(json_body), x_api_key: str | N
     """Grant/remove a plan without Stripe: {"plan": "basic" | "pro" | ""}."""
     require_api_key(x_api_key)
     plan = body.get("plan", "")
-    if plan and plan not in billing.PLANS:
-        raise HTTPException(400, f"Unknown plan; use one of {list(billing.PLANS)} or \"\"")
+    if plan and plan not in billing.ALL_PLANS:
+        raise HTTPException(400, f"Unknown plan; use one of {list(billing.ALL_PLANS)} or \"\"")
     with db.session() as conn:
         u = _api_user(conn, ident)
         conn.execute("UPDATE users SET plan = ?, plan_source = ? WHERE id = ?",
@@ -1123,11 +1175,14 @@ CHURN_COUNT = 3      # ... this many times ...
 CHURN_WINDOW = 300   # ... each within this long of the last = two machines fighting over one key
 
 
-def _track_churn(conn, d, prev_hs: int, hs: int, now: int):
-    """Two machines using the same config keep invalidating each other's session, so the server sees a new
-    handshake every few seconds. Network changes (Wi-Fi -> 4G, carrier NAT rotating the public IP) don't
-    cause extra handshakes, and handshakes are compared per server, so a device on two servers is fine."""
+def _track_churn(conn, d, prev_hs: int, hs: int, prev_endpoint: str, endpoint: str, now: int):
+    """Two machines using the same config keep invalidating each other's session: the server sees a new
+    handshake every few seconds AND the peer's source (ip:port) flipping between the machines.
+    Requiring both avoids false alarms: carrier NAT rotating a phone's IP doesn't add handshakes, and one
+    machine with tunnels to several servers (which can re-handshake often) keeps one source per server."""
     if not (prev_hs and hs > prev_hs and hs - prev_hs < CHURN_GAP):
+        return
+    if not (prev_endpoint and endpoint and endpoint != prev_endpoint):
         return
     churn = d["hs_churn"] + 1 if now - d["hs_churn_at"] < CHURN_WINDOW else 1
     d["hs_churn"], d["hs_churn_at"] = churn, now
@@ -1235,7 +1290,7 @@ def agent_sync(request: Request, body: dict = Depends(json_body), authorization:
                FROM devices d JOIN users u ON u.id = d.user_id""")}
         devices = {k: dict(v) for k, v in devices.items()}
         prev = {r["device_id"]: r for r in conn.execute(
-            "SELECT device_id, rx_bytes, tx_bytes, last_handshake FROM device_stats WHERE node_id = ?",
+            "SELECT device_id, rx_bytes, tx_bytes, last_handshake, endpoint FROM device_stats WHERE node_id = ?",
             (node["id"],))}
         today = now_utc().strftime("%Y-%m-%d")
         for p in peers_in:
@@ -1257,13 +1312,16 @@ def agent_sync(request: Request, body: dict = Depends(json_body), authorization:
                                     down = down + excluded.down, up = up + excluded.up""",
                              (today, d["user_id"], node["id"], down, up))
             conn.execute("""
-                INSERT INTO device_stats (device_id, node_id, rx_bytes, tx_bytes, last_handshake)
-                VALUES (?,?,?,?,?)
+                INSERT INTO device_stats (device_id, node_id, rx_bytes, tx_bytes, last_handshake, endpoint)
+                VALUES (?,?,?,?,?,?)
                 ON CONFLICT(device_id, node_id) DO UPDATE SET
                     rx_bytes = excluded.rx_bytes, tx_bytes = excluded.tx_bytes,
-                    last_handshake = excluded.last_handshake""",
-                (d["id"], node["id"], rx, tx, hs))
-            _track_churn(conn, d, last["last_handshake"] if last else 0, hs, now)
+                    last_handshake = excluded.last_handshake,
+                    endpoint = CASE WHEN excluded.endpoint != '' THEN excluded.endpoint ELSE endpoint END""",
+                (d["id"], node["id"], rx, tx, hs, str(p.get("endpoint") or "")))
+            endpoint = str(p.get("endpoint") or "")
+            _track_churn(conn, d, last["last_handshake"] if last else 0, hs,
+                         last["endpoint"] if last else "", endpoint, now)
             if hs > d["last_handshake"]:
                 # a handshake after an idle gap starts a new session
                 new_session = now - d["last_handshake"] >= ACTIVE_WINDOW or not d["active_since"]

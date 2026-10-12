@@ -366,3 +366,93 @@ def test_price_text_from_env_shows_on_homepage(client, monkeypatch):
     monkeypatch.setitem(billing.PLANS["pro"], "price_label", "$9.99/month")
     page = client.get("/").text
     assert "$4.99/month" in page and "$9.99/month" in page
+
+
+# --------------------------------------------------------------------------- unlimited (admin-only) plan
+
+def _login_admin(client):
+    client.post("/logout")
+    with db.session() as conn:
+        if not conn.execute("SELECT 1 FROM users WHERE email = 'boss@example.com'").fetchone():
+            main.create_user(conn, "boss@example.com", "adminpass123", is_admin=True)
+    client.post("/login", data={"email": "boss@example.com", "password": "adminpass123"})
+
+
+def test_unlimited_plan_has_no_device_limit(client):
+    secret = add_node(client)
+    signup(client)
+    uid = user_row("cust@example.com")["id"]
+    _login_admin(client)
+    client.post(f"/admin/users/{uid}/plan", data={"plan": "unlimited"})
+    u = user_row("cust@example.com")
+    assert billing.has_access(u) and billing.device_limit(u) >= billing.UNLIMITED
+    client.post("/logout")
+    client.post("/login", data={"email": "cust@example.com", "password": "password123"})
+    client.get("/portal")
+    for i in range(7):
+        client.post("/portal/devices", data={"name": f"D{i}"})
+    devs = devices_of("cust@example.com")
+    assert sync(client, secret, [handshake(d) for d in devs]) == {d["public_key"] for d in devs}
+    page = client.get("/portal").text
+    assert "Unlimited can be connected at a time" in page and "Unlimited" in page
+
+
+def test_unlimited_plan_is_never_for_sale(client, stripe_on):
+    assert "<h2>Unlimited</h2>" not in client.get("/").text
+    signup(client)
+    page = client.get("/portal").text                                  # pricing page
+    assert "<h2>Basic</h2>" in page and "<h2>Unlimited</h2>" not in page
+    assert client.post("/billing/checkout", data={"plan": "unlimited"}).status_code == 400
+    assert stripe_on.created_sessions == []
+
+
+def test_admins_themselves_are_unlimited(client):
+    _login_admin(client)
+    assert billing.device_limit(user_row("boss@example.com")) >= billing.UNLIMITED
+
+
+# --------------------------------------------------------------------------- changing email
+
+def test_customer_changes_their_email(client):
+    signup(client)
+    grant("cust@example.com", "basic")
+    r = client.post("/account/email", data={"email": "new@example.com", "password": "wrong-password"})
+    assert user_row("cust@example.com") is not None                      # wrong password: unchanged
+    client.post("/account/email", data={"email": "New@Example.com", "password": "password123"})
+    assert user_row("cust@example.com") is None and user_row("new@example.com") is not None
+    client.post("/logout")
+    r = client.post("/login", data={"email": "new@example.com", "password": "password123"}, follow_redirects=False)
+    assert r.headers["location"] == "/portal"
+
+
+def test_email_must_be_unique(client):
+    signup(client, "a@example.com")
+    client.post("/logout")
+    signup(client, "b@example.com")
+    client.post("/account/email", data={"email": "a@example.com", "password": "password123"})
+    assert user_row("b@example.com") is not None
+
+
+def test_admin_fixes_a_users_email_and_logs_follow(client):
+    signup(client, "typo@exmaple.com")
+    uid = user_row("typo@exmaple.com")["id"]
+    with db.session() as conn:
+        conn.execute("""INSERT INTO sessions (user_email, device_name, node_name, client_ip, started, last_seen)
+                        VALUES ('typo@exmaple.com', 'Phone', 'CHI1', '45.1.1.1', 1, 2)""")
+    _login_admin(client)
+    client.post(f"/admin/users/{uid}/email", data={"email": "fixed@example.com"})
+    assert user_row("fixed@example.com")["id"] == uid
+    with db.session() as conn:
+        assert conn.execute("SELECT user_email FROM sessions").fetchone()[0] == "fixed@example.com"
+
+
+def test_renamed_admin_is_not_recreated_on_restart(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_EMAIL", "boss@example.com")
+    monkeypatch.setenv("ADMIN_PASSWORD", "adminpass123")
+    _login_admin(client)
+    client.post("/account/email", data={"email": "me@valor.example", "password": "adminpass123"})
+    import asyncio
+    asyncio.run(main.startup())
+    with db.session() as conn:
+        admins = [r[0] for r in conn.execute("SELECT email FROM users WHERE is_admin = 1")]
+    assert admins == ["me@valor.example"]

@@ -265,8 +265,8 @@ def test_server_ranges_are_reused_after_removal(client):
         assert conn.execute("SELECT slot FROM nodes WHERE name = 'C'").fetchone()[0] == 0
 
 
-def _peer(dev, ip, hs):
-    return {"public_key": dev["public_key"], "handshake": hs, "rx": 1, "tx": 1, "endpoint": f"{ip}:5555"}
+def _peer(dev, ip, hs, port=5555):
+    return {"public_key": dev["public_key"], "handshake": hs, "rx": 1, "tx": 1, "endpoint": f"{ip}:{port}"}
 
 
 def _pro_customer(client):
@@ -296,8 +296,8 @@ def test_two_machines_behind_the_same_router_are_flagged_too(client):
     secret = add_node(client, "STL1")
     dev = _pro_customer(client)
     t = int(time.time()) - 60
-    for i in range(5):
-        sync(client, secret, [_peer(dev, "45.1.1.1", t + i * 10)])
+    for i in range(5):   # same public IP, but the router gives each machine its own port
+        sync(client, secret, [_peer(dev, "45.1.1.1", t + i * 10, port=40001 if i % 2 else 51999)])
     assert _shared_at(dev) > 0
 
 
@@ -347,3 +347,37 @@ def test_device_shows_what_it_downloaded_before_connecting(client):
     client.get(f"/portal/config/1.conf?device={dev['id']}")
     page = client.get("/portal").text
     assert "Downloaded STL1 — not connected yet" in page and "not per location" in page
+
+
+def test_one_machine_with_several_tunnels_rehandshaking_is_not_flagged(client):
+    """The '1415 Wishart' case: one machine, tunnels to STL1 and CHI1, re-handshaking often."""
+    chi, stl = add_node(client, "CHI1"), add_node(client, "STL1")
+    dev = _pro_customer(client)
+    t = int(time.time()) - 100
+    for i in range(6):
+        sync(client, chi, [_peer(dev, "45.1.1.1", t + i * 10, port=40001)])
+        sync(client, stl, [_peer(dev, "45.1.1.1", t + i * 10 + 5, port=40002)])
+    assert _shared_at(dev) == 0
+    status = client.get("/portal/status.json").json()
+    assert status["devices"][0]["connected"] and "STL1" in status["devices"][0]["node_name"]
+
+
+def test_location_cards_follow_the_selected_device(client):
+    chi, stl = add_node(client, "CHI1"), add_node(client, "STL1")
+    phone = _pro_customer(client)
+    client.post("/portal/devices", data={"name": "Laptop"})
+    laptop = devices_of("cust@example.com")[1]
+    now = int(time.time())
+    sync(client, stl, [_peer(phone, "45.1.1.1", now - 5)])
+    sync(client, chi, [_peer(laptop, "66.2.2.2", now - 5)])
+    sync(client, stl, [_peer(phone, "45.1.1.1", now - 5), _peer(laptop, "66.2.2.2", now - 5)])
+
+    def card(page, node_id):
+        i = page.index(f'data-node="{node_id}"')
+        return page[page.rfind("<article", 0, i):page.index("</article>", i)]
+
+    page = client.get(f"/portal?device={phone['id']}").text
+    assert "is-connected" not in card(page, 1) and "Laptop is connected here" in card(page, 1)
+    assert "is-connected" in card(page, 2) and "Laptop is connected here" in card(page, 2)
+    page = client.get(f"/portal?device={laptop['id']}").text
+    assert "is-connected" in card(page, 1) and "My device is connected here" in card(page, 2)

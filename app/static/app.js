@@ -167,6 +167,19 @@
         if (img.getAttribute('src') !== src) { img.classList.remove('failed'); img.nextElementSibling.hidden = true; img.src = src; }
       });
       $$('[data-k=device-name]').forEach(el => (el.textContent = name));
+      // location cards show the selected device's connections; other devices get a quieter note
+      const map = JSON.parse($('#locations')?.dataset.deviceNodes || '{}');
+      $$('[data-node]').forEach(card => {
+        const nid = +card.dataset.node, here = (map[id]?.nodes || []).includes(nid);
+        const others = Object.entries(map).filter(([k, v]) => k !== id && v.nodes.includes(nid)).map(([, v]) => v.name);
+        card.classList.toggle('is-connected', here);
+        const pill = $('[data-k=status]', card);
+        if (pill) pill.outerHTML = here ? '<span class="pill on" data-k="status"><span class="dot live"></span>Connected</span>'
+          : card.dataset.online === '1' ? '<span class="pill neutral" data-k="status">Online</span>'
+          : '<span class="pill off" data-k="status">Offline</span>';
+        const also = $('[data-k=also]', card);
+        if (also) { also.hidden = !others.length; also.textContent = others.length ? `● ${others.join(', ')} ${others.length === 1 ? 'is' : 'are'} connected here` : ''; }
+      });
     };
     let lastPick = pick?.value;
     pick?.addEventListener('change', () => {

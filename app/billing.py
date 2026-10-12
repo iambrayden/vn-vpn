@@ -24,6 +24,13 @@ PLANS = {
         "price_label": os.environ.get("PLAN_PRO_PRICE", ""),
     },
 }
+UNLIMITED = 1_000_000  # "no limit" for simultaneous devices
+# Plans that only admins can grant (never shown on the pricing page, never sold through Stripe).
+INTERNAL_PLANS = {
+    "unlimited": {"name": "Unlimited", "devices": UNLIMITED, "price_id": "", "price_label": "", "internal": True},
+}
+ALL_PLANS = {**PLANS, **INTERNAL_PLANS}
+
 # Stripe subscription statuses that keep the VPN working. past_due = Stripe is still retrying the card.
 LIVE_STATUSES = {"active", "trialing", "past_due"}
 
@@ -43,16 +50,22 @@ def has_access(user) -> bool:
         return False
     if user["is_admin"]:
         return True
+    if user["plan"] in INTERNAL_PLANS:
+        return user["plan_source"] == "manual"
     return user["plan"] in PLANS and (user["plan_source"] == "manual" or user["sub_status"] in LIVE_STATUSES)
 
 
 def device_limit(user) -> int:
     """Simultaneous connections allowed for this user."""
-    if user["plan"] in PLANS and has_access(user):
-        return PLANS[user["plan"]]["devices"]
     if user["is_admin"]:
-        return max(p["devices"] for p in PLANS.values())
+        return UNLIMITED
+    if user["plan"] in ALL_PLANS and has_access(user):
+        return ALL_PLANS[user["plan"]]["devices"]
     return 0
+
+
+def limit_label(limit: int) -> str:
+    return "Unlimited" if limit >= UNLIMITED else str(limit)
 
 
 def plan_for_price(price_id: str) -> str:
@@ -105,6 +118,15 @@ def checkout_url(user, plan: str, base_url: str) -> str:
     else:
         params["customer_email"] = user["email"]
     return _client.v1.checkout.sessions.create(params).url
+
+
+def update_customer_email(user, email: str):
+    """Keep the Stripe customer's email in sync when the account email changes (best effort)."""
+    if _client and user["stripe_customer_id"]:
+        try:
+            _client.v1.customers.update(user["stripe_customer_id"], {"email": email})
+        except stripe.StripeError:
+            pass
 
 
 def portal_url(user, return_url: str) -> str:

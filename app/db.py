@@ -205,6 +205,7 @@ MIGRATIONS = [
     # handshake churn: two machines on one key keep re-handshaking every few seconds (normal: ~2 minutes)
     ("devices", "hs_churn", "INTEGER NOT NULL DEFAULT 0"),
     ("devices", "hs_churn_at", "INTEGER NOT NULL DEFAULT 0"),
+    ("device_stats", "endpoint", "TEXT NOT NULL DEFAULT ''"),       # last client ip:port seen by that server
 ]
 
 
@@ -224,6 +225,10 @@ def init():
                          (next(s for s in range(1 << 16) if s not in used), n["id"]))
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS nodes_slot ON nodes (slot)")
         # the first "shared config" detector (public-IP changes) misfired on mobile carriers that rotate IPs
+        # ... and so did the second (handshake churn alone) for one machine with tunnels to several servers
+        if not conn.execute("SELECT 1 FROM meta WHERE key = 'shared_v3'").fetchone():
+            conn.execute("UPDATE devices SET shared_at = 0, hs_churn = 0")
+            conn.execute("INSERT INTO meta (key, value) VALUES ('shared_v3', datetime('now'))")
         if not conn.execute("SELECT 1 FROM meta WHERE key = 'shared_v2'").fetchone():
             conn.execute("UPDATE devices SET shared_at = 0")
             conn.execute("INSERT INTO meta (key, value) VALUES ('shared_v2', datetime('now'))")
