@@ -265,35 +265,67 @@ def test_server_ranges_are_reused_after_removal(client):
         assert conn.execute("SELECT slot FROM nodes WHERE name = 'C'").fetchone()[0] == 0
 
 
-def _peer(dev, ip):
-    return {"public_key": dev["public_key"], "handshake": int(time.time()) - 3, "rx": 1, "tx": 1,
-            "endpoint": f"{ip}:5555"}
+def _peer(dev, ip, hs):
+    return {"public_key": dev["public_key"], "handshake": hs, "rx": 1, "tx": 1, "endpoint": f"{ip}:5555"}
+
+
+def _pro_customer(client):
+    signup(client)
+    grant("cust@example.com", "pro")
+    client.get("/portal")
+    return devices_of("cust@example.com")[0]
+
+
+def _shared_at(dev):
+    with db.session() as conn:
+        return conn.execute("SELECT shared_at FROM devices WHERE id = ?", (dev["id"],)).fetchone()[0]
 
 
 def test_one_config_on_two_machines_is_flagged(client):
-    secret = add_node(client, "CHI1")
-    signup(client)
-    grant("cust@example.com", "pro")
-    client.get("/portal")
-    dev = devices_of("cust@example.com")[0]
-    for ip in ["45.1.1.1", "66.2.2.2", "45.1.1.1", "66.2.2.2"]:   # WireGuard follows whichever machine spoke last
-        sync(client, secret, [_peer(dev, ip)])
-    with db.session() as conn:
-        assert conn.execute("SELECT shared_at FROM devices WHERE id = ?", (dev["id"],)).fetchone()[0] > 0
+    """Two machines on one key keep replacing each other's session: a new handshake every few seconds."""
+    secret = add_node(client, "STL1")
+    dev = _pro_customer(client)
+    t = int(time.time()) - 60
+    for i, ip in enumerate(["45.1.1.1", "45.1.1.1", "66.2.2.2", "45.1.1.1", "66.2.2.2"]):
+        sync(client, secret, [_peer(dev, ip, t + i * 8)])
+    assert _shared_at(dev) > 0
     assert "this config is being used on two machines at once" in client.get("/portal").text
 
 
-def test_changing_network_once_is_not_flagged(client):
-    secret = add_node(client, "CHI1")
-    signup(client)
-    grant("cust@example.com", "pro")
-    client.get("/portal")
-    dev = devices_of("cust@example.com")[0]
-    for ip in ["45.1.1.1", "45.1.1.1", "66.2.2.2", "66.2.2.2"]:   # Wi-Fi -> mobile data
-        sync(client, secret, [_peer(dev, ip)])
-    with db.session() as conn:
-        assert conn.execute("SELECT shared_at FROM devices WHERE id = ?", (dev["id"],)).fetchone()[0] == 0
+def test_two_machines_behind_the_same_router_are_flagged_too(client):
+    secret = add_node(client, "STL1")
+    dev = _pro_customer(client)
+    t = int(time.time()) - 60
+    for i in range(5):
+        sync(client, secret, [_peer(dev, "45.1.1.1", t + i * 10)])
+    assert _shared_at(dev) > 0
+
+
+def test_mobile_carrier_rotating_ips_is_not_flagged(client):
+    """Carrier NAT can change a phone's public IP constantly; handshakes still come every ~2 minutes."""
+    secret = add_node(client, "STL1")
+    dev = _pro_customer(client)
+    t = int(time.time()) - 600
+    for i, ip in enumerate(["45.1.1.1", "66.2.2.2", "45.1.1.1", "66.2.2.2", "77.3.3.3"]):
+        sync(client, secret, [_peer(dev, ip, t + i * 121)])
+    assert _shared_at(dev) == 0
     assert "being used on two machines at once" not in client.get("/portal").text
+
+
+def test_one_device_on_two_servers_is_reported_and_not_flagged(client):
+    chi, stl = add_node(client, "CHI1"), add_node(client, "STL1")
+    dev = _pro_customer(client)
+    t = int(time.time()) - 400
+    for i in range(3):   # tunnels to both servers, handshakes interleaved 60 s apart overall
+        sync(client, chi, [_peer(dev, "45.1.1.1", t + i * 120)])
+        sync(client, stl, [_peer(dev, "45.1.1.1", t + i * 120 + 60)])
+    assert _shared_at(dev) == 0
+    status = client.get("/portal/status.json").json()
+    assert status["devices"][0]["node_name"] in ("CHI1, STL1", "STL1, CHI1")
+    assert sorted(n["name"] for n in status["nodes"] if n["connected"]) == ["CHI1", "STL1"]
+    _admin(client)
+    sessions = client.get("/admin/status.json").json()["sessions"]
+    assert sorted(x["node"] for x in sessions) == ["CHI1", "STL1"]
 
 
 def test_downloads_are_remembered_per_device_and_location(client):

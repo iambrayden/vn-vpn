@@ -202,6 +202,9 @@ MIGRATIONS = [
     ("devices", "ip_changed_at", "INTEGER NOT NULL DEFAULT 0"),
     ("devices", "ip_flips", "INTEGER NOT NULL DEFAULT 0"),
     ("devices", "shared_at", "INTEGER NOT NULL DEFAULT 0"),
+    # handshake churn: two machines on one key keep re-handshaking every few seconds (normal: ~2 minutes)
+    ("devices", "hs_churn", "INTEGER NOT NULL DEFAULT 0"),
+    ("devices", "hs_churn_at", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -220,6 +223,10 @@ def init():
             conn.execute("UPDATE nodes SET slot = ? WHERE id = ?",
                          (next(s for s in range(1 << 16) if s not in used), n["id"]))
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS nodes_slot ON nodes (slot)")
+        # the first "shared config" detector (public-IP changes) misfired on mobile carriers that rotate IPs
+        if not conn.execute("SELECT 1 FROM meta WHERE key = 'shared_v2'").fetchone():
+            conn.execute("UPDATE devices SET shared_at = 0")
+            conn.execute("INSERT INTO meta (key, value) VALUES ('shared_v2', datetime('now'))")
 
 
 def _migrate_user_keys_to_devices(conn):

@@ -355,12 +355,16 @@ def user_devices(conn, user):
     allowed = allowed_device_ids(conn, user_id=user["id"])
     nodes = {n["id"]: n["name"] for n in conn.execute("SELECT id, name FROM nodes")}
     for d in devices:
-        last = conn.execute("""SELECT node_id, rx_bytes, tx_bytes FROM device_stats WHERE device_id = ?
-                               ORDER BY last_handshake DESC LIMIT 1""", (d["id"],)).fetchone()
-        d["connected"] = d["id"] in allowed and now - d["last_handshake"] < ACTIVE_WINDOW
-        d["node_id"] = last["node_id"] if last else None
-        d["node_name"] = nodes.get(d["node_id"], "") if last else ""
-        d["down"], d["up"] = (last["tx_bytes"], last["rx_bytes"]) if last else (0, 0)
+        # a device can have tunnels up to several servers at once (e.g. WireGuard on Windows)
+        live = conn.execute("""SELECT node_id, rx_bytes, tx_bytes FROM device_stats
+                               WHERE device_id = ? AND last_handshake > ? ORDER BY last_handshake DESC""",
+                            (d["id"], now - ACTIVE_WINDOW)).fetchall()
+        d["connected"] = d["id"] in allowed and bool(live)
+        d["node_ids"] = [r["node_id"] for r in live] if d["connected"] else []
+        d["node_id"] = d["node_ids"][0] if d["node_ids"] else None
+        d["node_name"] = ", ".join(nodes.get(i, "") for i in d["node_ids"])
+        d["down"] = sum(r["tx_bytes"] for r in live) if d["connected"] else 0
+        d["up"] = sum(r["rx_bytes"] for r in live) if d["connected"] else 0
         d["kicked"] = d["kicked_until"] > now
         d["shared"] = now - d["shared_at"] < 3600
         d["downloaded"] = [r[0] for r in conn.execute(
@@ -406,7 +410,7 @@ def portal_nodes(conn, devices):
         "SELECT node_id, COUNT(*) n FROM device_stats WHERE last_handshake > ? GROUP BY node_id",
         (now - ACTIVE_WINDOW,))}
     for n in nodes:
-        n["devices_here"] = [d["name"] for d in devices if d["connected"] and d["node_id"] == n["id"]]
+        n["devices_here"] = [d["name"] for d in devices if d["connected"] and n["id"] in d["node_ids"]]
         n["connected"] = bool(n["devices_here"])
         n["load"] = min(100, round(100 * active.get(n["id"], 0) / NODE_CAPACITY))
         n["country_name"] = countries.COUNTRIES.get(n["country"], "")
@@ -714,9 +718,9 @@ def live_sessions(conn):
     rows = conn.execute("""
         SELECT d.id, d.name device, d.active_since, u.email, n.name node, s.rx_bytes, s.tx_bytes, s.last_handshake
         FROM devices d JOIN users u ON u.id = d.user_id
-        JOIN device_stats s ON s.device_id = d.id AND s.last_handshake = d.last_handshake
+        JOIN device_stats s ON s.device_id = d.id
         JOIN nodes n ON n.id = s.node_id
-        WHERE d.last_handshake > ? ORDER BY d.active_since DESC""", (time.time() - ACTIVE_WINDOW,)).fetchall()
+        WHERE s.last_handshake > ? ORDER BY d.active_since DESC, n.name""", (time.time() - ACTIVE_WINDOW,)).fetchall()
     return [{"id": r["id"], "email": r["email"], "device": r["device"], "node": r["node"],
              "down": human_bytes(r["tx_bytes"]), "up": human_bytes(r["rx_bytes"]),
              "since": ago(r["active_since"] or r["last_handshake"]).replace(" ago", "")} for r in rows]
@@ -1113,19 +1117,22 @@ def agent_whoami(request: Request):
     return {"ip": client_ip_of(request)}
 
 
-SHARED_FLIPS = 3          # address changes ...
-SHARED_WINDOW = 300       # ... each within this many seconds of the previous one = two machines, one config
+CHURN_GAP = 60       # a re-handshake sooner than this after the previous one (healthy tunnels: ~120 s) ...
+CHURN_COUNT = 3      # ... this many times ...
+CHURN_WINDOW = 300   # ... each within this long of the last = two machines fighting over one key
 
 
-def _track_endpoint(conn, d, ip: str, now: int):
-    """WireGuard keeps one endpoint per peer and follows whichever machine spoke last, so a config used on two
-    machines makes the address flip back and forth. A phone moving Wi-Fi -> 4G changes it once or twice."""
-    if ip == d["last_ip"]:
+def _track_churn(conn, d, prev_hs: int, hs: int, now: int):
+    """Two machines using the same config keep invalidating each other's session, so the server sees a new
+    handshake every few seconds. Network changes (Wi-Fi -> 4G, carrier NAT rotating the public IP) don't
+    cause extra handshakes, and handshakes are compared per server, so a device on two servers is fine."""
+    if not (prev_hs and hs > prev_hs and hs - prev_hs < CHURN_GAP):
         return
-    flips = d["ip_flips"] + 1 if d["last_ip"] and now - d["ip_changed_at"] < SHARED_WINDOW else 0
-    conn.execute("""UPDATE devices SET last_ip = ?, ip_changed_at = ?, ip_flips = ?,
+    churn = d["hs_churn"] + 1 if now - d["hs_churn_at"] < CHURN_WINDOW else 1
+    d["hs_churn"], d["hs_churn_at"] = churn, now
+    conn.execute("""UPDATE devices SET hs_churn = ?, hs_churn_at = ?,
                     shared_at = CASE WHEN ? >= ? THEN ? ELSE shared_at END WHERE id = ?""",
-                 (ip, now, flips, flips, SHARED_FLIPS, now, d["id"]))
+                 (churn, now, churn, CHURN_COUNT, now, d["id"]))
 
 
 def _new_slot(conn) -> int:
@@ -1223,10 +1230,12 @@ def agent_sync(request: Request, body: dict = Depends(json_body), authorization:
     with db.session() as conn:
         devices = {d["public_key"]: d for d in conn.execute(
             """SELECT d.id, d.user_id, d.name, d.public_key, d.address, d.last_handshake, d.active_since, u.email,
-                      d.last_ip, d.ip_changed_at, d.ip_flips
+                      d.hs_churn, d.hs_churn_at
                FROM devices d JOIN users u ON u.id = d.user_id""")}
+        devices = {k: dict(v) for k, v in devices.items()}
         prev = {r["device_id"]: r for r in conn.execute(
-            "SELECT device_id, rx_bytes, tx_bytes FROM device_stats WHERE node_id = ?", (node["id"],))}
+            "SELECT device_id, rx_bytes, tx_bytes, last_handshake FROM device_stats WHERE node_id = ?",
+            (node["id"],))}
         today = now_utc().strftime("%Y-%m-%d")
         for p in peers_in:
             d = devices.get(p.get("public_key"))
@@ -1253,9 +1262,7 @@ def agent_sync(request: Request, body: dict = Depends(json_body), authorization:
                     rx_bytes = excluded.rx_bytes, tx_bytes = excluded.tx_bytes,
                     last_handshake = excluded.last_handshake""",
                 (d["id"], node["id"], rx, tx, hs))
-            ip = str(p.get("endpoint") or "").rsplit(":", 1)[0].strip("[]")
-            if ip and now - hs < ACTIVE_WINDOW:
-                _track_endpoint(conn, d, ip, now)
+            _track_churn(conn, d, last["last_handshake"] if last else 0, hs, now)
             if hs > d["last_handshake"]:
                 # a handshake after an idle gap starts a new session
                 new_session = now - d["last_handshake"] >= ACTIVE_WINDOW or not d["active_since"]
