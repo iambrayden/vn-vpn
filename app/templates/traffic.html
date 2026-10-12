@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Traffic log · {{ brand }}{% endblock %}
+{% block page %}traffic{% endblock %}
+
+{% macro qs(extra) -%}
+{%- set p = {'view': view, 'q': q, 'node': node, 'hours': hours, 'group': group} -%}
+{%- for k, v in extra.items() %}{% set _ = p.update({k: v}) %}{% endfor -%}
+?{% for k, v in p.items() if v not in ('', 0, None) %}{{ k }}={{ v|urlencode }}{{ '&' if not loop.last }}{% endfor %}
+{%- endmacro %}
+
+{% block content %}
+<a href="/admin" class="small">← Dashboard</a>
+<div class="section-head" style="margin-top:6px">
+  <div><h1 style="margin:0">Traffic log</h1>
+    <span class="muted small">Where customers connect from and where their traffic goes.
+      Kept {{ session_days }} days (connections) / {{ flow_days }} days (destinations).</span></div>
+  <a class="btn" href="/admin/traffic.csv{{ qs({}) }}">Export CSV</a>
+</div>
+
+<div class="tabs" role="tablist">
+  <a class="tab {{ 'active' if view == 'sessions' }}" href="{{ qs({'view': 'sessions', 'group': 0, 'page': 1}) }}">Connections <span class="muted small">where from</span></a>
+  <a class="tab {{ 'active' if view == 'destinations' }}" href="{{ qs({'view': 'destinations', 'page': 1}) }}">Destinations <span class="muted small">where to</span></a>
+</div>
+
+{% if view == 'sessions' and not log_sessions or view == 'destinations' and not log_destinations %}
+<div class="card notice warn" style="margin-bottom:16px"><div>
+  {{ 'Connection' if view == 'sessions' else 'Destination' }} logging is turned off
+  (<code>{{ 'LOG_SESSIONS' if view == 'sessions' else 'LOG_DESTINATIONS' }}=false</code>). Older entries below are kept until they expire.
+</div></div>
+{% endif %}
+
+<form class="toolbar filters" method="get">
+  <input type="hidden" name="view" value="{{ view }}">
+  <label class="search" style="margin:0"><span class="sr-only">Search</span>
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+    <input type="search" name="q" value="{{ q }}" placeholder="{{ 'Customer, device or IP' if view == 'sessions' else 'Customer, destination IP or port' }}"></label>
+  <select name="node" aria-label="Server"><option value="0">All servers</option>
+    {% for s in nodes %}<option value="{{ s.id }}" {{ 'selected' if s.id == node }}>{{ s.name }}</option>{% endfor %}</select>
+  <select name="hours" aria-label="Time range">
+    {% for h, label in [(1, 'Last hour'), (24, 'Last 24 hours'), (168, 'Last 7 days'), (720, 'Last 30 days')] %}
+    <option value="{{ h }}" {{ 'selected' if h == hours }}>{{ label }}</option>{% endfor %}</select>
+  {% if view == 'destinations' %}
+  <label class="check" style="margin:0"><input type="checkbox" name="group" value="1" {{ 'checked' if group }} onchange="this.form.submit()"> Group by destination</label>
+  {% endif %}
+  <button class="btn">Filter</button>
+</form>
+
+<div class="card table-card" style="margin-top:14px"><div class="table-wrap"><table>
+{% if view == 'sessions' %}
+  <thead><tr><th>Customer</th><th>Device</th><th>Connected from</th><th>Server</th><th>Started</th><th>Duration</th><th>↓ Down</th><th>↑ Up</th></tr></thead>
+  <tbody>
+  {% for s in rows %}
+  <tr><td><a href="{{ qs({'q': s.user_email, 'page': 1}) }}">{{ s.user_email }}</a></td><td>{{ s.device_name }}</td>
+    <td class="mono small"><a href="{{ qs({'q': s.client_ip, 'page': 1}) }}">{{ s.client_ip }}</a></td>
+    <td>{{ s.node_name }}</td><td class="muted">{{ s.started|ts }}</td>
+    <td>{% if now_ts - s.last_seen < 240 %}<span class="ok-text">● {{ (now_ts - s.started)|duration }}</span>{% else %}{{ (s.last_seen - s.started)|duration }}{% endif %}</td>
+    <td>{{ s.tx_bytes|bytes }}</td><td>{{ s.rx_bytes|bytes }}</td></tr>
+  {% else %}<tr><td colspan="8" class="muted">Nothing logged for these filters.</td></tr>{% endfor %}
+  </tbody>
+{% elif group %}
+  <thead><tr><th>Destination</th><th>Port</th><th>Protocol</th><th>Customers</th><th>Connections</th><th>↑ Sent</th><th>↓ Received</th><th>Last seen</th></tr></thead>
+  <tbody>
+  {% for f in rows %}
+  <tr><td class="mono small"><a href="{{ qs({'q': f.dst, 'group': 0, 'page': 1}) }}">{{ f.dst }}</a></td><td>{{ f.dport|port(f.proto) }}</td><td>{{ f.proto|upper }}</td>
+    <td>{{ f.users }}</td><td>{{ f.conns }}</td><td>{{ f.bytes_out|bytes }}</td><td>{{ f.bytes_in|bytes }}</td><td class="muted">{{ f.last_seen|ts }}</td></tr>
+  {% else %}<tr><td colspan="8" class="muted">Nothing logged for these filters.</td></tr>{% endfor %}
+  </tbody>
+{% else %}
+  <thead><tr><th>Time</th><th>Customer</th><th>Device</th><th>Server</th><th>Destination</th><th>Port</th><th>Conns</th><th>↑ Sent</th><th>↓ Received</th></tr></thead>
+  <tbody>
+  {% for f in rows %}
+  <tr><td class="muted">{{ f.first_seen|ts }}</td>
+    <td>{% if f.user_email %}<a href="{{ qs({'q': f.user_email, 'page': 1}) }}">{{ f.user_email }}</a>{% else %}<span class="muted mono small">{{ f.src }}</span>{% endif %}</td>
+    <td>{{ f.device_name }}</td><td>{{ f.node_name }}</td>
+    <td class="mono small"><a href="{{ qs({'q': f.dst, 'page': 1}) }}">{{ f.dst }}</a></td><td>{{ f.dport|port(f.proto) }}</td>
+    <td>{{ f.conns }}</td><td>{{ f.bytes_out|bytes }}</td><td>{{ f.bytes_in|bytes }}</td></tr>
+  {% else %}<tr><td colspan="9" class="muted">Nothing logged for these filters.</td></tr>{% endfor %}
+  </tbody>
+{% endif %}
+</table></div></div>
+
+{% if page > 1 or has_more %}
+<div class="toolbar" style="justify-content:center;margin-top:16px">
+  {% if page > 1 %}<a class="btn sm" href="{{ qs({'page': page - 1}) }}">← Newer</a>{% endif %}
+  <span class="muted small">Page {{ page }}</span>
+  {% if has_more %}<a class="btn sm" href="{{ qs({'page': page + 1}) }}">Older →</a>{% endif %}
+</div>
+{% endif %}
+<p class="muted small" style="margin-top:16px">Destinations are IP addresses (the server never sees which website names were looked up). Bytes are counted when a connection closes, so very new or long-lived connections may show 0 B until they end.</p>
+{% endblock %}

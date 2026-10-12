@@ -4,8 +4,8 @@
 <div class="auth-wrap">
   <div class="card auth">
     <h1>Create your account</h1>
-    <p class="muted">You'll be connected in under two minutes.</p>
-    <form method="post" action="/signup">
+    <p class="muted">{% if plan %}You picked <b>{{ plans[plan].name }}</b> — {{ plans[plan].devices }} device{{ 's' if plans[plan].devices != 1 }} at a time. Next stop: secure checkout.{% else %}You'll be connected in under two minutes.{% endif %}</p>
+    <form method="post" action="/signup{{ '?plan=' ~ plan if plan }}">
       <label>Email <input type="email" name="email" autocomplete="email" required autofocus></label>
       <label>Password <span class="hint">· at least 8 characters</span>
         <span class="pw"><input type="password" name="password" minlength="8" autocomplete="new-password" required><button type="button" class="btn ghost" data-reveal>Show</button></span>

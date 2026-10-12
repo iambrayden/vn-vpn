@@ -6,6 +6,9 @@ A self-hosted, resellable WireGuard VPN suite:
 - **Node agent** — turn any Linux VPS into a VPN server with one command. It installs WireGuard, registers with the panel and keeps its peer list in sync every 15s.
 - **Client portal** — customers sign up, get a guided 3-step setup tailored to their device, and pick locations by flag with live load and a "Recommended" pick. The page turns green live when their tunnel connects; switching country is one tap in the WireGuard app.
 - **Subscriptions (Stripe)** — the portal is paywalled. **Basic** = 1 device connected at a time, **Pro** = 5 at a time. Stripe Checkout, plan upgrades and the Stripe Customer Portal (cards, invoices, cancel) are built in.
+- **Server monitoring** — per-server CPU, memory, disk, bandwidth and connected devices with live charts (1h / 24h / 7d), plus optional Discord/Slack alerts.
+- **Traffic log** — where each customer connects from (their real IP, server, duration, data) and where their traffic goes (destination IP, port, bytes), searchable and exportable as CSV.
+- **Public homepage** at `/` with live locations and pricing; sign-up flows straight into checkout.
 - **Provisioning API** — let other systems create, suspend, delete users and grant plans.
 
 | Client portal | Admin dashboard | Add-server wizard |
@@ -54,6 +57,20 @@ Without Coolify: `docker build -t vnvpn . && docker run -p 8000:8000 -v vnvpn:/d
 Use test mode keys and card `4242 4242 4242 4242` to try it end to end. Optional: `PLAN_BASIC_DEVICES` / `PLAN_PRO_DEVICES` (default 1 / 5), `PLAN_BASIC_NAME` / `PLAN_PRO_NAME`, `MAX_DEVICES` (cap on devices a customer may add; default unlimited — only simultaneous connections are limited).
 
 Customers with a failing card (`past_due`) keep access while Stripe retries; `unpaid`/`canceled` lose it. Admins can give anyone a plan for free from **Admin → Users → ••• → Give Basic/Pro free** (or `PUT /api/v1/users/{email}/plan`).
+
+## Monitoring, alerts & traffic logging
+
+Agents (v0.3.0+) report system stats on every check-in. Click a server in **Admin → Servers** for its charts; the servers table shows live CPU, memory and bandwidth.
+
+**Alerts:** set `ALERT_WEBHOOK_URL` to a Discord or Slack incoming-webhook URL to get a message when a server goes offline / comes back, averages over `ALERT_CPU_PERCENT` (90) CPU for 5 minutes, or passes `ALERT_DISK_PERCENT` (90) disk.
+
+**Traffic log** (**Admin → Traffic log**):
+- *Connections* — customer, device, the public IP they connected from, server, start, duration, data. Off with `LOG_SESSIONS=false`; kept `SESSION_LOG_DAYS` (30).
+- *Destinations* — every destination IP/port/protocol each device connected to, with connection count and bytes, from the server's connection-tracking table (`conntrack`). Off with `LOG_DESTINATIONS=false` (agents stop collecting within ~15 s); kept `FLOW_LOG_DAYS` (7). Group by destination to see the top destinations.
+
+> ⚖️ Logging customer traffic is a significant privacy decision for a VPN. Say exactly what you record and for how long in your privacy policy/terms, and check the rules where you and your customers are (e.g. GDPR in the EU). Use the retention settings to keep no more than you need.
+
+Metrics are kept `METRICS_DAYS` (7). Old rows are deleted hourly.
 
 ## Add a VPN server
 

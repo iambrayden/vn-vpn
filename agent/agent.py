@@ -15,12 +15,14 @@ import json
 import os
 import socket
 import subprocess
+import shutil
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 CONF_DIR = os.environ.get("VNVPN_DIR", "/etc/vnvpn")
 CONF_FILE = os.path.join(CONF_DIR, "agent.json")
 KEY_FILE = os.path.join(CONF_DIR, "private.key")
@@ -123,9 +125,159 @@ def peer_stats(iface):
         return []
     stats = []
     for line in lines[1:]:  # first line is the interface itself
-        pub, _psk, _endpoint, _allowed, handshake, rx, tx, _ka = line.split("\t")
-        stats.append({"public_key": pub, "handshake": int(handshake), "rx": int(rx), "tx": int(tx)})
+        pub, _psk, endpoint, _allowed, handshake, rx, tx, _ka = line.split("\t")
+        stats.append({"public_key": pub, "handshake": int(handshake), "rx": int(rx), "tx": int(tx),
+                      "endpoint": "" if endpoint == "(none)" else endpoint})
     return stats
+
+
+# --------------------------------------------------------------------------- server metrics
+
+class Metrics:
+    """CPU / memory / disk / bandwidth from /proc, as rates since the previous sample."""
+
+    def __init__(self, wan):
+        self.wan = wan
+        self.prev_cpu = self._cpu()
+        self.prev_net = (time.time(), *self._net())
+
+    @staticmethod
+    def _cpu():
+        with open("/proc/stat") as f:
+            vals = [int(v) for v in f.readline().split()[1:]]
+        idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
+        return sum(vals), idle
+
+    def _net(self):
+        with open("/proc/net/dev") as f:
+            for line in f:
+                name, _, data = line.partition(":")
+                if name.strip() == self.wan:
+                    cols = data.split()
+                    return int(cols[0]), int(cols[8])
+        return 0, 0
+
+    def sample(self, active_peers):
+        total, idle = self._cpu()
+        dt, di = total - self.prev_cpu[0], idle - self.prev_cpu[1]
+        self.prev_cpu = (total, idle)
+        now, rx, tx = time.time(), *self._net()
+        secs = max(now - self.prev_net[0], 1e-6)
+        rx_bps = max(0, rx - self.prev_net[1]) * 8 / secs
+        tx_bps = max(0, tx - self.prev_net[2]) * 8 / secs
+        self.prev_net = (now, rx, tx)
+        mem = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                k, v = line.split(":")
+                mem[k] = int(v.split()[0]) * 1024
+        disk = os.statvfs("/")
+        with open("/proc/uptime") as f:
+            uptime = float(f.read().split()[0])
+        return {
+            "cpu": round(100 * (dt - di) / dt, 1) if dt else 0.0,
+            "mem_total": mem.get("MemTotal", 0),
+            "mem_used": mem.get("MemTotal", 0) - mem.get("MemAvailable", mem.get("MemFree", 0)),
+            "disk_total": disk.f_blocks * disk.f_frsize,
+            "disk_used": (disk.f_blocks - disk.f_bfree) * disk.f_frsize,
+            "load1": round(os.getloadavg()[0], 2),
+            "rx_bps": round(rx_bps), "tx_bps": round(tx_bps),
+            "uptime": int(uptime), "active_peers": active_peers, "cores": os.cpu_count() or 1,
+        }
+
+
+# --------------------------------------------------------------------------- destination log
+
+def parse_conntrack(line):
+    """One `conntrack -E` event -> (event, proto, src, dst, dport, bytes_out, bytes_in) or None."""
+    line = line.strip()
+    if line.startswith("[NEW]"):
+        event = "NEW"
+    elif line.startswith("[DESTROY]"):
+        event = "DESTROY"
+    else:
+        return None
+    toks = line.split()
+    proto = toks[1]
+    orig, reply = {}, {}
+    for t in toks[2:]:
+        if "=" not in t:
+            continue
+        k, v = t.split("=", 1)
+        (orig if k not in orig else reply)[k] = v
+    if "src" not in orig or "dst" not in orig:
+        return None
+    return (event, proto, orig["src"], orig["dst"], int(orig.get("dport", 0)),
+            int(orig.get("bytes", 0)), int(reply.get("bytes", 0)))
+
+
+class FlowCollector:
+    """Aggregates connections from VPN clients by (client, destination, port, protocol)."""
+    MAX_KEYS = 20000
+
+    def __init__(self, subnet):
+        self.subnet = subnet
+        self.flows, self.dropped = {}, 0
+        self.lock = threading.Lock()
+        self.proc = None
+
+    def start(self):
+        if not shutil.which("conntrack"):
+            # agents that self-updated predate the installer adding conntrack
+            for pm, pkg in (("apt-get", "conntrack"), ("dnf", "conntrack-tools"), ("yum", "conntrack-tools"),
+                            ("apk", "conntrack-tools")):
+                if shutil.which(pm):
+                    cmd = [pm, "add", pkg] if pm == "apk" else [pm, "install", "-y", pkg]
+                    log(f"installing {pkg} for destination logging")
+                    subprocess.run(cmd, capture_output=True, env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"})
+                    break
+        if not shutil.which("conntrack"):
+            log("destination logging is on but 'conntrack' couldn't be installed")
+            return False
+        subprocess.run(["sysctl", "-q", "-w", "net.netfilter.nf_conntrack_acct=1"], capture_output=True)
+        self.proc = subprocess.Popen(["conntrack", "-E", "-e", "NEW,DESTROY", "-s", self.subnet],
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        threading.Thread(target=self._read, daemon=True).start()
+        log(f"logging destinations for {self.subnet}")
+        return True
+
+    def stop(self):
+        if self.proc:
+            self.proc.terminate()
+            self.proc = None
+
+    def _read(self):
+        for line in self.proc.stdout:
+            self.add(parse_conntrack(line))
+
+    def add(self, ev):
+        if not ev:
+            return
+        event, proto, src, dst, dport, b_out, b_in = ev
+        key = (src, dst, dport, proto)
+        now = int(time.time())
+        with self.lock:
+            f = self.flows.get(key)
+            if f is None:
+                if len(self.flows) >= self.MAX_KEYS:
+                    self.dropped += 1
+                    return
+                f = self.flows[key] = {"src": src, "dst": dst, "dport": dport, "proto": proto,
+                                       "first": now, "last": now, "conns": 0, "out": 0, "in": 0}
+            f["last"] = now
+            if event == "NEW":
+                f["conns"] += 1
+            else:
+                f["out"] += b_out
+                f["in"] += b_in
+
+    def drain(self):
+        with self.lock:
+            flows, self.flows = list(self.flows.values()), {}
+            if self.dropped:
+                log(f"flow log: dropped {self.dropped} flows over the {self.MAX_KEYS} per-interval cap")
+                self.dropped = 0
+        return flows
 
 
 def render_wg_conf(conf, desired):
@@ -239,15 +391,33 @@ def run(args):
             log(f"restored {conf['interface']} from last config")
         except subprocess.CalledProcessError as e:
             log(f"could not restore interface: {e.stderr}")
+    metrics = Metrics(conf.get("wan_iface") or default_iface())
+    flows, unsent_flows = None, []
     while True:
         try:
-            desired = http("POST", f"{conf['panel']}/api/agent/sync",
-                           {"agent_version": VERSION, "peers": peer_stats(conf["interface"])},
-                           secret=conf["secret"])
+            peers = peer_stats(conf["interface"])
+            now = time.time()
+            body = {"agent_version": VERSION, "peers": peers,
+                    "metrics": metrics.sample(sum(1 for p in peers if now - p["handshake"] < 180))}
+            if flows:
+                unsent_flows = (unsent_flows + flows.drain())[-FlowCollector.MAX_KEYS:]
+                body["flows"] = unsent_flows
+            desired = http("POST", f"{conf['panel']}/api/agent/sync", body, secret=conf["secret"])
+            unsent_flows = []
             last = apply(conf, desired, last)
             interval, failures = int(desired.get("interval", 15)), 0
+            # destination logging is switched on/off from the panel
+            if desired.get("flow_logging") and not flows and not DRY_RUN:
+                flows = FlowCollector(desired.get("subnet") or desired["address"])
+                if not flows.start():
+                    flows = None
+            elif not desired.get("flow_logging") and flows:
+                flows.stop()
+                flows, unsent_flows = None, []
             latest = desired.get("agent_version")
             if latest and latest != VERSION and not args.once and not DRY_RUN:
+                if flows:
+                    flows.stop()
                 self_update(conf, latest)
         except urllib.error.HTTPError as e:
             failures += 1

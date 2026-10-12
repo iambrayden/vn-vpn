@@ -27,6 +27,7 @@
   <button data-tab="overview" role="tab">Overview</button>
   <button data-tab="servers" role="tab">Servers <span class="count">{{ nodes|length }}</span></button>
   <button data-tab="users" role="tab">Users <span class="count">{{ users|length }}</span></button>
+  <a class="tab tab-link" href="/admin/traffic">Traffic log →</a>
 </div>
 
 <!-- ============================================================ overview -->
@@ -59,7 +60,7 @@
       <ul class="list">
         {% for n in nodes %}
         <li><span class="flag sm">{{ n.country|flag }}</span>
-          <span class="grow"><b>{{ n.name }}</b> <span class="muted small">{{ n.location }}</span></span>
+          <span class="grow"><a href="/admin/servers/{{ n.id }}"><b>{{ n.name }}</b></a> <span class="muted small">{{ n.location }}</span></span>
           <span class="muted small"><span data-node-active="{{ n.id }}">{{ n.active_peers }}</span> online</span>
           {{ node_status(n) }}</li>
         {% endfor %}
@@ -84,18 +85,20 @@
 <div data-panel="servers" hidden>
   {% if nodes %}
   <div class="card table-card"><div class="table-wrap"><table>
-    <thead><tr><th>Server</th><th>Status</th><th>Connected</th><th class="hide-sm">Traffic</th><th class="hide-sm">Endpoint</th><th class="hide-sm">Last check-in</th><th></th></tr></thead>
+    <thead><tr><th>Server</th><th>Status</th><th>Connected</th><th class="hide-sm">CPU</th><th class="hide-sm">Memory</th><th class="hide-sm">Bandwidth</th><th class="hide-sm">Last check-in</th><th></th></tr></thead>
     <tbody>
     {% for n in nodes %}
     <tr data-node-row="{{ n.id }}">
       <td><div class="cell-main"><span class="flag">{{ n.country|flag }}</span>
-        <div><b>{{ n.name }}</b>{% if not n.enabled %} <span class="pill warn">Hidden</span>{% endif %}
+        <div><a href="/admin/servers/{{ n.id }}"><b>{{ n.name }}</b></a>{% if not n.enabled %} <span class="pill warn">Hidden</span>{% endif %}
           {% if n.private_ip %} <span class="pill off" title="Clients can't reach a private address. Edit the server and set its public IPv4.">Private IP</span>{% endif %}
-          <div class="muted small">{{ n.location or '—' }}</div></div></div></td>
+          <div class="muted small">{{ n.location or '—' }} · <span class="mono">{{ n.endpoint_host }}</span></div></div></div></td>
       <td>{{ node_status(n) }}</td>
       <td data-node-active="{{ n.id }}">{{ n.active_peers }}</td>
-      <td class="hide-sm" data-node-traffic="{{ n.id }}">{{ (n.rx + n.tx)|bytes }}</td>
-      <td class="hide-sm mono small">{{ n.endpoint_host }}:{{ n.listen_port }}</td>
+      {% set mm = n.m %}
+      <td class="hide-sm"><div class="mini" data-node-cpu="{{ n.id }}">{% if mm %}<span class="meter{{ ' high' if mm.cpu >= 90 else ' mid' if mm.cpu >= 70 }}"><i style="width:{{ [mm.cpu, 2]|max }}%"></i></span><span>{{ '%.0f'|format(mm.cpu) }}%</span>{% else %}<span class="muted">—</span>{% endif %}</div></td>
+      <td class="hide-sm"><div class="mini" data-node-mem="{{ n.id }}">{% if mm %}<span class="meter{{ ' high' if mm.mem_pct >= 90 else ' mid' if mm.mem_pct >= 70 }}"><i style="width:{{ [mm.mem_pct, 2]|max }}%"></i></span><span>{{ '%.0f'|format(mm.mem_pct) }}%</span>{% else %}<span class="muted">—</span>{% endif %}</div></td>
+      <td class="hide-sm" data-node-bw="{{ n.id }}">{{ (mm.rx_bps + mm.tx_bps)|bps if mm else '—' }}</td>
       <td class="hide-sm muted small"><span data-node-seen="{{ n.id }}">{{ n.last_seen|ago }}</span>{% if n.agent_version %} · v{{ n.agent_version }}{% endif %}</td>
       <td class="actions">
         <button class="btn sm" data-open="edit-node-{{ n.id }}">Edit</button>

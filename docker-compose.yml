@@ -22,6 +22,13 @@ services:
       - STRIPE_PRICE_PRO=${STRIPE_PRICE_PRO:-}
       - PLAN_BASIC_DEVICES=${PLAN_BASIC_DEVICES:-1}
       - PLAN_PRO_DEVICES=${PLAN_PRO_DEVICES:-5}
+      # Monitoring & logging
+      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-}
+      - LOG_SESSIONS=${LOG_SESSIONS:-true}
+      - LOG_DESTINATIONS=${LOG_DESTINATIONS:-true}
+      - SESSION_LOG_DAYS=${SESSION_LOG_DAYS:-30}
+      - FLOW_LOG_DAYS=${FLOW_LOG_DAYS:-7}
+      - METRICS_DAYS=${METRICS_DAYS:-7}
     volumes:
       - vnvpn-data:/data
     healthcheck:

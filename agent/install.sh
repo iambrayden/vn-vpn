@@ -39,15 +39,15 @@ say "Installing packages"
 if command -v apt-get >/dev/null; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
-  apt-get install -y -qq wireguard-tools iptables python3 curl iproute2 >/dev/null
+  apt-get install -y -qq wireguard-tools iptables python3 curl iproute2 conntrack >/dev/null
 elif command -v dnf >/dev/null; then
   dnf install -y -q epel-release 2>/dev/null || true
-  dnf install -y -q wireguard-tools iptables python3 curl iproute
+  dnf install -y -q wireguard-tools iptables python3 curl iproute conntrack-tools
 elif command -v yum >/dev/null; then
   yum install -y -q epel-release 2>/dev/null || true
-  yum install -y -q wireguard-tools iptables python3 curl iproute
+  yum install -y -q wireguard-tools iptables python3 curl iproute conntrack-tools
 elif command -v apk >/dev/null; then
-  apk add -q wireguard-tools iptables python3 curl iproute2
+  apk add -q wireguard-tools iptables python3 curl iproute2 conntrack-tools
 else
   die "unsupported distro: install wireguard-tools, iptables and python3 manually"
 fi

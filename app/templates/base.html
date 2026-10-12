@@ -28,12 +28,19 @@
         <form method="post" action="/logout"><button>Log out</button></form>
       </div>
     </details>
+    {% else %}
+    <nav class="nav">
+      <a href="/#locations" class="hide-sm">Locations</a>
+      <a href="/#pricing" class="hide-sm">Pricing</a>
+      <a href="/login">Log in</a>
+    </nav>
+    {% if open_signup %}<a class="btn primary sm" href="/signup">Get started</a>{% endif %}
     {% endif %}
   </div>
 </header>
-<main>
+{% block main %}<main>
   {% block content %}{% endblock %}
-</main>
+</main>{% endblock %}
 
 <div id="toasts" aria-live="polite">
   {% for kind, msg in flashes %}

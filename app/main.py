@@ -1,4 +1,6 @@
 """VN-VPN management panel: client portal, admin console, provisioning API and agent API."""
+import asyncio
+import csv
 import hashlib
 import io
 import ipaddress
@@ -19,7 +21,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import billing, countries, crypto, db
+from . import billing, countries, crypto, db, monitoring
 
 BASE = Path(__file__).parent
 AGENT_DIR = BASE.parent / "agent"
@@ -84,6 +86,40 @@ def ago(value):
     return "just now"
 
 
+def human_bps(bps):
+    bps = float(bps or 0)
+    for unit in ("bps", "Kbps", "Mbps", "Gbps"):
+        if bps < 1000 or unit == "Gbps":
+            return f"{bps:.0f} {unit}" if unit == "bps" else f"{bps:.1f} {unit}"
+        bps /= 1000
+
+
+def duration(secs):
+    secs = int(secs or 0)
+    d, h, m = secs // 86400, secs % 86400 // 3600, secs % 3600 // 60
+    return f"{d}d {h}h" if d else f"{h}h {m}m" if h else f"{m}m" if m else f"{secs}s"
+
+
+def fmt_ts(ts):
+    return datetime.fromtimestamp(int(ts), timezone.utc).strftime("%b %-d %H:%M") if ts else "—"
+
+
+PORT_NAMES = {80: "HTTP", 443: "HTTPS", 53: "DNS", 853: "DNS-TLS", 22: "SSH", 25: "SMTP", 465: "SMTPS",
+              587: "SMTP", 993: "IMAPS", 995: "POP3S", 123: "NTP", 3478: "STUN", 5228: "Google Play",
+              5223: "Apple Push", 1194: "OpenVPN", 51820: "WireGuard", 3389: "RDP", 8080: "HTTP-alt"}
+
+
+def port_name(port, proto=""):
+    if proto == "icmp":
+        return "ping"
+    name = PORT_NAMES.get(int(port or 0))
+    return f"{port} · {name}" if name else str(port)
+
+
+templates.env.filters["bps"] = human_bps
+templates.env.filters["duration"] = duration
+templates.env.filters["ts"] = fmt_ts
+templates.env.filters["port"] = port_name
 templates.env.filters["bytes"] = human_bytes
 templates.env.filters["ago"] = ago
 templates.env.filters["flag"] = countries.flag
@@ -186,8 +222,9 @@ def visible_nodes(conn):
 
 
 @app.on_event("startup")
-def startup():
+async def startup():
     db.init()
+    asyncio.get_running_loop().create_task(monitoring.background_loop(node_online))
     admin_email = os.environ.get("ADMIN_EMAIL")
     admin_password = os.environ.get("ADMIN_PASSWORD")
     if admin_email and admin_password:
@@ -214,10 +251,20 @@ async def http_error(request: Request, exc: StarletteHTTPException):
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    user = current_user(request)
-    if user:
-        return RedirectResponse("/admin" if user["is_admin"] else "/portal", status_code=303)
-    return RedirectResponse("/login", status_code=303)
+    """Public homepage: what the service is, live locations, pricing."""
+    with db.session() as conn:
+        nodes = visible_nodes(conn)
+    for n in nodes:
+        n["country_name"] = countries.COUNTRIES.get(n["country"], "")
+    nodes.sort(key=lambda n: (not n["online"], n["country_name"] or n["location"], n["name"]))
+    country_count = len({n["country"] or n["location"] for n in nodes})
+    return render(request, "landing.html", nodes=nodes, country_count=country_count, **plan_context_public())
+
+
+def plan_context_public():
+    return {"billing_enabled": billing.enabled(),
+            "price_labels": {k: billing.price_label(k) for k in billing.PLANS} if billing.enabled()
+            else {k: p["price_label"] for k, p in billing.PLANS.items()}}
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -233,14 +280,15 @@ def login(request: Request, email: str = Form(...), password: str = Form(...)):
         flash(request, "Invalid email or password.", "error")
         return RedirectResponse("/login", status_code=303)
     request.session["uid"] = user["id"]
-    return RedirectResponse("/", status_code=303)
+    return RedirectResponse("/admin" if user["is_admin"] else "/portal", status_code=303)
 
 
 @app.get("/signup", response_class=HTMLResponse)
 def signup_page(request: Request):
     if not OPEN_SIGNUP:
         raise HTTPException(404, "Sign-up is closed.")
-    return render(request, "signup.html")
+    plan = request.query_params.get("plan", "")
+    return render(request, "signup.html", plan=plan if plan in billing.PLANS else "")
 
 
 @app.post("/signup")
@@ -255,6 +303,8 @@ def signup(request: Request, email: str = Form(...), password: str = Form(...)):
         return RedirectResponse("/signup", status_code=303)
     request.session["uid"] = uid
     flash(request, "Welcome! Pick a plan to start using the VPN.")
+    if request.query_params.get("plan") in billing.PLANS and billing.enabled():
+        return billing_checkout(request, request.query_params["plan"])
     return RedirectResponse("/portal", status_code=303)
 
 
@@ -614,7 +664,8 @@ def admin_status(request: Request):
     with db.session() as conn:
         nodes = admin_nodes(conn)
         sessions = live_sessions(conn)
-    return {"sessions": sessions,"nodes": [{"id": n["id"], "name": n["name"], "online": n["online"], "active": n["active_peers"],
+        metrics = monitoring.latest_metrics(conn)
+    return {"sessions": sessions, "metrics": {str(k): v for k, v in metrics.items()},"nodes": [{"id": n["id"], "name": n["name"], "online": n["online"], "active": n["active_peers"],
                        "traffic": human_bytes(n["rx"] + n["tx"]), "last_seen": ago(n["last_seen"])}
                       for n in nodes],
             "online": sum(n["online"] for n in nodes), "active": sum(n["active_peers"] for n in nodes)}
@@ -632,7 +683,9 @@ def admin(request: Request):
             GROUP BY u.id ORDER BY u.id DESC""")]
         tokens = conn.execute("SELECT * FROM enroll_tokens WHERE revoked = 0 ORDER BY created_at DESC").fetchall()
         sessions = live_sessions(conn)
+        metrics = monitoring.latest_metrics(conn)
     for n in nodes:
+        n["m"] = metrics.get(n["id"])
         try:
             n["private_ip"] = ipaddress.ip_address(n["endpoint_host"]).is_private
         except ValueError:
@@ -641,6 +694,106 @@ def admin(request: Request):
                   panel=panel_url(request), now_ts=now_utc().timestamp(),
                   provision_enabled=bool(PROVISION_API_KEY), billing_enabled=billing.enabled(),
                   webhook_configured=bool(billing.STRIPE_WEBHOOK_SECRET))
+
+
+@app.get("/admin/servers/{node_id}", response_class=HTMLResponse)
+def admin_server(request: Request, node_id: int):
+    require_admin(request)
+    with db.session() as conn:
+        node = next((n for n in admin_nodes(conn) if n["id"] == node_id), None)
+        if not node:
+            raise HTTPException(404, "Server not found.")
+        m = monitoring.latest_metrics(conn).get(node_id)
+        recent = conn.execute("""SELECT * FROM sessions WHERE node_id = ? ORDER BY last_seen DESC LIMIT 15""",
+                              (node_id,)).fetchall()
+    return render(request, "server.html", n=node, m=m, recent=recent, now_ts=time.time(),
+                  agent_version=AGENT_VERSION, has_stats=version_tuple(node["agent_version"]) >= (0, 3, 0),
+                  self_updates=version_tuple(node["agent_version"]) >= (0, 2, 0))
+
+
+def version_tuple(v: str | None) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", v or ""))
+
+
+@app.get("/admin/servers/{node_id}/metrics.json")
+def admin_server_metrics(request: Request, node_id: int, range: str = "1h"):
+    require_admin(request)
+    with db.session() as conn:
+        node = conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()
+        if not node:
+            raise HTTPException(404)
+        data = monitoring.series(conn, node_id, range)
+        data["latest"] = monitoring.latest_metrics(conn).get(node_id)
+        data["online"] = node_online(node)
+        data["last_seen"] = ago(node["last_seen"])
+    return data
+
+
+TRAFFIC_PAGE = 200
+
+
+def _traffic_query(view: str, q: str, node: int, hours: int, group: bool):
+    since = int(time.time()) - max(1, min(hours, 24 * 90)) * 3600
+    like = f"%{q.strip()}%"
+    params: list = [since]
+    if view == "sessions":
+        where = "last_seen >= ?"
+        if q.strip():
+            where += " AND (user_email LIKE ? OR client_ip LIKE ? OR device_name LIKE ?)"
+            params += [like] * 3
+        if node:
+            where += " AND node_id = ?"
+            params.append(node)
+        return f"SELECT * FROM sessions WHERE {where} ORDER BY last_seen DESC", params
+    where = "last_seen >= ?"
+    if q.strip():
+        where += " AND (user_email LIKE ? OR dst LIKE ? OR src LIKE ? OR device_name LIKE ? OR CAST(dport AS TEXT) = ?)"
+        params += [like] * 4 + [q.strip()]
+    if node:
+        where += " AND node_id = ?"
+        params.append(node)
+    if group:
+        return (f"""SELECT dst, dport, proto, COUNT(DISTINCT user_email) users, SUM(conns) conns,
+                    SUM(bytes_out) bytes_out, SUM(bytes_in) bytes_in, MAX(last_seen) last_seen
+                    FROM flow_log WHERE {where} GROUP BY dst, dport, proto
+                    ORDER BY SUM(bytes_in + bytes_out) DESC, SUM(conns) DESC""", params)
+    return f"SELECT * FROM flow_log WHERE {where} ORDER BY last_seen DESC, id DESC", params
+
+
+@app.get("/admin/traffic", response_class=HTMLResponse)
+def admin_traffic(request: Request, view: str = "sessions", q: str = "", node: int = 0, hours: int = 24,
+                  group: int = 0, page: int = 1):
+    require_admin(request)
+    view = view if view in ("sessions", "destinations") else "sessions"
+    sql, params = _traffic_query(view, q, node, hours, bool(group))
+    page = max(1, page)
+    with db.session() as conn:
+        rows = conn.execute(f"{sql} LIMIT {TRAFFIC_PAGE + 1} OFFSET {(page - 1) * TRAFFIC_PAGE}", params).fetchall()
+        nodes = conn.execute("SELECT id, name FROM nodes ORDER BY name").fetchall()
+    return render(request, "traffic.html", rows=rows[:TRAFFIC_PAGE], has_more=len(rows) > TRAFFIC_PAGE, view=view,
+                  q=q, node=node, hours=hours, group=group, page=page, nodes=nodes, now_ts=time.time(),
+                  log_sessions=monitoring.LOG_SESSIONS, log_destinations=monitoring.LOG_DESTINATIONS,
+                  flow_days=monitoring.FLOW_LOG_DAYS, session_days=monitoring.SESSION_LOG_DAYS)
+
+
+@app.get("/admin/traffic.csv")
+def admin_traffic_csv(request: Request, view: str = "sessions", q: str = "", node: int = 0, hours: int = 24,
+                      group: int = 0):
+    require_admin(request)
+    sql, params = _traffic_query(view if view in ("sessions", "destinations") else "sessions", q, node, hours,
+                                 bool(group))
+    with db.session() as conn:
+        rows = conn.execute(f"{sql} LIMIT 100000", params).fetchall()
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    if rows:
+        cols = [c for c in rows[0].keys() if c not in ("rx_base", "tx_base")]
+        w.writerow(cols)
+        for r in rows:
+            w.writerow([datetime.fromtimestamp(r[c], timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                        if c in ("started", "last_seen", "first_seen") else r[c] for c in cols])
+    return Response(buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{view}-{int(time.time())}.csv"'})
 
 
 @app.post("/admin/tokens")
@@ -904,7 +1057,8 @@ async def agent_sync(request: Request, authorization: str | None = Header(None))
                      (now_utc().strftime("%Y-%m-%dT%H:%M:%S"), str(body.get("agent_version", ""))[:20], node["id"]))
         now = int(time.time())
         devices = {d["public_key"]: d for d in conn.execute(
-            "SELECT id, public_key, address, last_handshake, active_since FROM devices")}
+            """SELECT d.id, d.name, d.public_key, d.address, d.last_handshake, d.active_since, u.email
+               FROM devices d JOIN users u ON u.id = d.user_id""")}
         for p in body.get("peers", []):
             d = devices.get(p.get("public_key"))
             if not d:
@@ -917,17 +1071,26 @@ async def agent_sync(request: Request, authorization: str | None = Header(None))
                     rx_bytes = excluded.rx_bytes, tx_bytes = excluded.tx_bytes,
                     last_handshake = excluded.last_handshake""",
                 (d["id"], node["id"], int(p.get("rx", 0)), int(p.get("tx", 0)), hs))
+            if now - hs < ACTIVE_WINDOW:
+                monitoring.record_session(conn, node, d, d["email"], p.get("endpoint", ""),
+                                          int(p.get("rx", 0)), int(p.get("tx", 0)))
             if hs > d["last_handshake"]:
                 # a handshake after an idle gap starts a new session
                 new_session = now - d["last_handshake"] >= ACTIVE_WINDOW or not d["active_since"]
                 conn.execute("UPDATE devices SET last_handshake = ?, active_since = ? WHERE id = ?",
                              (hs, hs if new_session else d["active_since"], d["id"]))
+        if isinstance(body.get("metrics"), dict):
+            monitoring.record_metrics(conn, node["id"], body["metrics"])
+        if body.get("flows"):
+            monitoring.record_flows(conn, node, body["flows"],
+                                    {d["address"]: d for d in devices.values()})
         allowed = allowed_device_ids(conn) if node["enabled"] else set()
     peers = [{"public_key": d["public_key"], "allowed_ips": f"{d['address']}/32"}
              for d in devices.values() if d["id"] in allowed]
     return {"node_id": node["id"], "address": crypto.server_address(), "subnet": str(crypto.VPN_SUBNET),
             "mtu": crypto.WG_MTU, "endpoint": node["endpoint_host"], "listen_port": node["listen_port"],
-            "peers": peers, "interval": 15, "agent_version": AGENT_VERSION}
+            "peers": peers, "interval": 15, "agent_version": AGENT_VERSION,
+            "flow_logging": monitoring.LOG_DESTINATIONS}
 
 
 @app.get("/healthz")

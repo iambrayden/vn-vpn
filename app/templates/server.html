@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}{{ n.name }} · {{ brand }}{% endblock %}
+{% block page %}server{% endblock %}
+
+{% macro meter(pct) %}<span class="meter{{ ' high' if pct >= 90 else ' mid' if pct >= 70 }}"><i style="width: {{ [pct, 2]|max }}%"></i></span>{% endmacro %}
+
+{% block content %}
+<div class="stack" data-server="{{ n.id }}">
+  <a href="/admin#servers" class="small">← All servers</a>
+
+  <div class="section-head" style="margin-top:6px">
+    <div class="cell-main">
+      <span class="flag" style="width:44px">{{ n.country|flag }}</span>
+      <div>
+        <h1 style="margin:0">{{ n.name }}</h1>
+        <div class="muted small">{{ n.location }}{% if n.location %} · {% endif %}<span class="mono">{{ n.endpoint_host }}:{{ n.listen_port }}</span>
+          · agent v{{ n.agent_version or '?' }}{% if m %} · up {{ m.uptime|duration }}{% endif %}</div>
+      </div>
+    </div>
+    <span class="pill {{ 'on' if n.online else 'off' }}" data-k="online"><span class="dot{{ ' live' if n.online }}"></span>{{ 'Online' if n.online else 'Offline' }} · <span data-k="seen">{{ n.last_seen|ago }}</span></span>
+  </div>
+
+  {% if not m %}
+  <div class="card notice warn"><div>
+    <b>No server stats yet.</b>
+    {% if n.agent_version and not has_stats %}This server runs agent v{{ n.agent_version }}, which can't report stats{% if not self_updates %} or update itself. Re-run the install command on it once{% else %}. It updates itself to v{{ agent_version }} within a minute{% endif %}.
+    {% else %}Stats appear after the server's next check-in.{% endif %}
+  </div></div>
+  {% endif %}
+
+  <div class="stats">
+    <div class="card stat"><div class="k">CPU</div><div class="v" data-k="cpu">{{ '%.0f'|format(m.cpu) ~ '%' if m else '—' }}</div>
+      <div class="muted small" data-k="load">{% if m %}load {{ '%.2f'|format(m.load1) }} · {{ m.cores }} core{{ 's' if m.cores != 1 }}{% endif %}</div></div>
+    <div class="card stat"><div class="k">Memory</div><div class="v" data-k="mem">{{ '%.0f'|format(m.mem_pct) ~ '%' if m else '—' }}</div>
+      <div class="muted small" data-k="mem-detail">{% if m %}{{ m.mem_used|bytes }} of {{ m.mem_total|bytes }}{% endif %}</div></div>
+    <div class="card stat"><div class="k">Bandwidth now</div><div class="v" data-k="bw">{{ (m.rx_bps + m.tx_bps)|bps if m else '—' }}</div>
+      <div class="muted small" data-k="bw-detail">{% if m %}↓ {{ m.rx_bps|bps }} in · ↑ {{ m.tx_bps|bps }} out{% endif %}</div></div>
+    <div class="card stat"><div class="k">Connected devices</div><div class="v" data-k="peers">{{ m.active_peers if m else n.active_peers }}</div>
+      <div class="muted small" data-k="disk">{% if m %}disk {{ '%.0f'|format(m.disk_pct) }}% · {{ m.disk_used|bytes }} of {{ m.disk_total|bytes }}{% endif %}</div></div>
+  </div>
+
+  <div class="section-head">
+    <h2>History</h2>
+    <div class="chips" role="group" aria-label="Time range">
+      <button class="chip active" data-range="1h">1 hour</button>
+      <button class="chip" data-range="24h">24 hours</button>
+      <button class="chip" data-range="7d">7 days</button>
+    </div>
+  </div>
+  <div class="charts">
+    <figure class="card chart-card"><figcaption><h3>CPU</h3><span class="muted small">% busy, all cores</span></figcaption><div class="chart" id="chart-cpu"></div></figure>
+    <figure class="card chart-card"><figcaption><h3>Memory</h3><span class="muted small">% used</span></figcaption><div class="chart" id="chart-mem"></div></figure>
+    <figure class="card chart-card"><figcaption><h3>Bandwidth</h3><span class="muted small">Mbps on the public interface</span></figcaption><div class="chart" id="chart-bw"></div></figure>
+    <figure class="card chart-card"><figcaption><h3>Connected devices</h3><span class="muted small">average per interval</span></figcaption><div class="chart" id="chart-peers"></div></figure>
+  </div>
+
+  <section>
+    <div class="section-head"><h2>Recent sessions</h2><a class="small" href="/admin/traffic?view=sessions&node={{ n.id }}">Full traffic log →</a></div>
+    <div class="card table-card"><div class="table-wrap"><table>
+      <thead><tr><th>Customer</th><th>Device</th><th>Connected from</th><th>Started</th><th>Duration</th><th class="hide-sm">↓ Down</th><th class="hide-sm">↑ Up</th></tr></thead>
+      <tbody>
+      {% for s in recent %}
+      <tr><td>{{ s.user_email }}</td><td>{{ s.device_name }}</td><td class="mono small">{{ s.client_ip }}</td>
+        <td class="muted">{{ s.started|ts }}</td>
+        <td>{% if now_ts - s.last_seen < 240 %}<span class="ok-text">● {{ (now_ts - s.started)|duration }}</span>{% else %}{{ (s.last_seen - s.started)|duration }}{% endif %}</td>
+        <td class="hide-sm">{{ s.tx_bytes|bytes }}</td><td class="hide-sm">{{ s.rx_bytes|bytes }}</td></tr>
+      {% else %}<tr><td colspan="7" class="muted">No sessions recorded yet.</td></tr>{% endfor %}
+      </tbody>
+    </table></div></div>
+  </section>
+</div>
+{% endblock %}

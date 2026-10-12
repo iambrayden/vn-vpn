@@ -65,6 +65,64 @@ CREATE TABLE IF NOT EXISTS device_stats (
     PRIMARY KEY (device_id, node_id)
 );
 
+-- One row per agent check-in (~15s); pruned after METRICS_DAYS.
+CREATE TABLE IF NOT EXISTS node_metrics (
+    node_id      INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    ts           INTEGER NOT NULL,
+    cpu          REAL NOT NULL,
+    mem_used     INTEGER NOT NULL,
+    mem_total    INTEGER NOT NULL,
+    disk_used    INTEGER NOT NULL,
+    disk_total   INTEGER NOT NULL,
+    load1        REAL NOT NULL,
+    rx_bps       INTEGER NOT NULL,
+    tx_bps       INTEGER NOT NULL,
+    active_peers INTEGER NOT NULL,
+    uptime       INTEGER NOT NULL,
+    cores        INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS node_metrics_node_ts ON node_metrics (node_id, ts);
+
+-- Where customers connect from: one row per device session on a server.
+CREATE TABLE IF NOT EXISTS sessions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id   INTEGER REFERENCES devices(id) ON DELETE SET NULL,
+    node_id     INTEGER REFERENCES nodes(id) ON DELETE SET NULL,
+    user_email  TEXT NOT NULL,
+    device_name TEXT NOT NULL,
+    node_name   TEXT NOT NULL,
+    client_ip   TEXT NOT NULL,
+    started     INTEGER NOT NULL,
+    last_seen   INTEGER NOT NULL,
+    rx_base     INTEGER NOT NULL DEFAULT 0,
+    tx_base     INTEGER NOT NULL DEFAULT 0,
+    rx_bytes    INTEGER NOT NULL DEFAULT 0,   -- client upload
+    tx_bytes    INTEGER NOT NULL DEFAULT 0    -- client download
+);
+CREATE INDEX IF NOT EXISTS sessions_device ON sessions (device_id, node_id, id);
+CREATE INDEX IF NOT EXISTS sessions_seen ON sessions (last_seen);
+
+-- Where traffic goes: connections from the tunnel, aggregated per check-in by destination.
+CREATE TABLE IF NOT EXISTS flow_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    first_seen  INTEGER NOT NULL,
+    last_seen   INTEGER NOT NULL,
+    node_id     INTEGER REFERENCES nodes(id) ON DELETE SET NULL,
+    device_id   INTEGER REFERENCES devices(id) ON DELETE SET NULL,
+    user_email  TEXT NOT NULL,
+    device_name TEXT NOT NULL,
+    node_name   TEXT NOT NULL,
+    src         TEXT NOT NULL,
+    dst         TEXT NOT NULL,
+    dport       INTEGER NOT NULL,
+    proto       TEXT NOT NULL,
+    conns       INTEGER NOT NULL,
+    bytes_out   INTEGER NOT NULL,
+    bytes_in    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS flow_log_seen ON flow_log (last_seen);
+CREATE INDEX IF NOT EXISTS flow_log_dst ON flow_log (dst);
+
 CREATE TABLE IF NOT EXISTS stripe_events (
     id         TEXT PRIMARY KEY,
     type       TEXT NOT NULL,

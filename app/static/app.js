@@ -48,6 +48,24 @@
     if (pendingForm) { pendingForm.dataset.confirmed = '1'; pendingForm.requestSubmit(); }
   });
 
+  // ---------------------------------------------------------------- row menus
+  // Row "•••" menus live inside scrollable tables; float them above the page instead of
+  // letting the table clip them (which also produced a scrollbar).
+  document.addEventListener('toggle', e => {
+    const d = e.target;
+    if (!(d instanceof HTMLDetailsElement) || !d.classList.contains('row-menu') || !d.open) return;
+    $$('details.row-menu[open]').forEach(o => o !== d && (o.open = false));
+    const pop = $('.menu-pop', d), r = $('summary', d).getBoundingClientRect();
+    pop.style.position = 'fixed';
+    pop.style.left = 'auto';
+    pop.style.right = `${Math.max(8, window.innerWidth - r.right)}px`;
+    const below = window.innerHeight - r.bottom, h = pop.offsetHeight;
+    pop.style.top = below < h + 12 && r.top > h + 12 ? `${r.top - h - 6}px` : `${r.bottom + 6}px`;
+  }, true);
+  const closeRowMenus = () => $$('details.row-menu[open]').forEach(d => (d.open = false));
+  window.addEventListener('scroll', closeRowMenus, true);
+  window.addEventListener('resize', closeRowMenus);
+
   // ---------------------------------------------------------------- copy & reveal
   document.addEventListener('click', async e => {
     const b = e.target.closest('[data-copy]');
@@ -112,6 +130,11 @@
     const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; n = +n || 0;
     while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
     return i ? n.toFixed(1) + ' ' + u[i] : n + ' B';
+  };
+  const fmtBps = n => {
+    const u = ['bps', 'Kbps', 'Mbps', 'Gbps']; let i = 0; n = +n || 0;
+    while (n >= 1000 && i < u.length - 1) { n /= 1000; i++; }
+    return i ? n.toFixed(1) + ' ' + u[i] : Math.round(n) + ' bps';
   };
   const poll = (url, fn, ms = 10000) => {
     const tick = () => document.hidden || fetch(url, { credentials: 'same-origin' })
@@ -185,6 +208,120 @@
     if (pending) { sessionStorage.removeItem('vn-toast'); toast(pending); }
   }
 
+  // ---------------------------------------------------------------- server page charts
+  if (page === 'server') {
+    const id = $('[data-server]').dataset.server;
+    let range = '1h';
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const el = (tag, attrs = {}, parent) => {
+      const e = document.createElementNS(svgNS, tag);
+      for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+      parent?.append(e); return e;
+    };
+    const fmtTime = (t, withDate) => new Date(t * 1000).toLocaleString([], withDate
+      ? { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' } : { hour: '2-digit', minute: '2-digit' });
+    // smallest round step (1, 2, 2.5, 5 x 10^k) at least as big as the target -> 3-5 gridlines
+    const niceStep = v => { const p = 10 ** Math.floor(Math.log10(v)); return [1, 2, 2.5, 5, 10].map(m => m * p).find(s => s >= v * 0.999); };
+
+    // One-axis line chart; series = [{key, label, color, fmt}]. Lines break where data is missing (server offline).
+    function lineChart(box, data, series, { max, fmt }) {
+      box.replaceChildren();
+      const pts = data.points;
+      if (!pts.length) { box.innerHTML = '<div class="empty-msg">No data for this period yet</div>'; return; }
+      const W = box.clientWidth, H = box.clientHeight, L = 44, R = 8, T = 8, B = 22;
+      const x0 = data.since, x1 = data.until;
+      const peak = Math.max(...pts.flatMap(p => series.map(s => p[s.key]))) || 1;
+      const step = max ? niceStep(max / 4) : niceStep(peak / 3.5);
+      const yMax = max ?? Math.ceil(peak * 1.05 / step) * step;
+      const X = t => L + (t - x0) / (x1 - x0) * (W - L - R), Y = v => T + (1 - v / yMax) * (H - T - B);
+      const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img',
+        'aria-label': series.map(s => `${s.label}: latest ${s.fmt(pts.at(-1)[s.key])}`).join(', ') }, box);
+      const grid = el('g', { class: 'grid' }, svg);
+      for (let v = 0; v <= yMax + step / 1000; v += step) {
+        const y = Y(v);
+        el('line', { x1: L, x2: W - R, y1: y, y2: y }, grid);
+        el('text', { x: L - 6, y: y + 4, 'text-anchor': 'end', class: 'tick' }, svg).textContent = fmt(v);
+      }
+      const span = x1 - x0, ticks = 5;
+      for (let i = 0; i <= ticks; i++) {
+        const t = x0 + span * i / ticks;
+        el('text', { x: X(t), y: H - 4, 'text-anchor': i === 0 ? 'start' : i === ticks ? 'end' : 'middle', class: 'tick' }, svg)
+          .textContent = fmtTime(t, span > 86400);
+      }
+      for (const s of series) {
+        let d = '', prev = null;
+        for (const p of pts) {
+          const gap = prev && p.t - prev.t > data.bucket * 2.5;
+          d += `${!prev || gap ? 'M' : 'L'}${X(p.t + data.bucket / 2).toFixed(1)},${Y(p[s.key]).toFixed(1)}`;
+          prev = p;
+        }
+        el('path', { d, class: 'line', stroke: s.color }, svg);
+      }
+      // hover: crosshair + tooltip on the nearest bucket
+      const cross = el('line', { class: 'cross', y1: T, y2: H - B, visibility: 'hidden' }, svg);
+      const dots = series.map(s => el('circle', { r: 4, fill: s.color, class: 'dot-hover', visibility: 'hidden' }, svg));
+      const tip = document.createElement('div'); tip.className = 'chart-tip'; tip.hidden = true; box.append(tip);
+      const hit = el('rect', { x: L, y: T, width: W - L - R, height: H - T - B, fill: 'transparent' }, svg);
+      const show = ev => {
+        const r = svg.getBoundingClientRect(), mx = (ev.touches?.[0] ?? ev).clientX - r.left;
+        const t = x0 + (mx - L) / (W - L - R) * (x1 - x0);
+        const p = pts.reduce((a, b) => Math.abs(b.t - t) < Math.abs(a.t - t) ? b : a);
+        const px = X(p.t + data.bucket / 2);
+        cross.setAttribute('x1', px); cross.setAttribute('x2', px); cross.setAttribute('visibility', 'visible');
+        series.forEach((s, i) => { dots[i].setAttribute('cx', px); dots[i].setAttribute('cy', Y(p[s.key])); dots[i].setAttribute('visibility', 'visible'); });
+        tip.innerHTML = `<div class="t">${fmtTime(p.t, true)}</div>` + series.map(s =>
+          `<div class="row"><span class="swatch" style="background:${s.color}"></span>${s.label}<b>${s.fmt(p[s.key])}</b></div>`).join('');
+        tip.hidden = false;
+        const left = Math.min(Math.max(px + 12, 0), W - tip.offsetWidth);
+        tip.style.left = `${px + 12 + tip.offsetWidth > W ? px - tip.offsetWidth - 12 : left}px`; tip.style.top = '0px';
+      };
+      const hide = () => { tip.hidden = true; cross.setAttribute('visibility', 'hidden'); dots.forEach(d => d.setAttribute('visibility', 'hidden')); };
+      hit.addEventListener('pointermove', show); hit.addEventListener('pointerleave', hide);
+      hit.addEventListener('touchstart', show, { passive: true });
+    }
+
+    const css = getComputedStyle(document.documentElement);
+    const c1 = () => css.getPropertyValue('--series-1').trim(), c2 = () => css.getPropertyValue('--series-2').trim();
+    const pct = v => `${Math.round(v)}%`;
+    const mbps = v => v === 0 ? '0' : `${+(v / 1e6).toFixed(v < 1e7 ? 1 : 0)} Mbps`;
+    let last = null;
+    const draw = data => {
+      last = data;
+      lineChart($('#chart-cpu'), data, [{ key: 'cpu', label: 'CPU', color: c1(), fmt: pct }], { max: 100, fmt: pct });
+      lineChart($('#chart-mem'), data, [{ key: 'mem', label: 'Memory', color: c1(), fmt: pct }], { max: 100, fmt: pct });
+      lineChart($('#chart-bw'), data, [
+        { key: 'rx', label: 'In', color: c1(), fmt: mbps }, { key: 'tx', label: 'Out', color: c2(), fmt: mbps }], { fmt: mbps });
+      lineChart($('#chart-peers'), data, [{ key: 'peers', label: 'Devices', color: c1(), fmt: v => v.toFixed(v < 10 && v % 1 ? 1 : 0) }],
+        { fmt: v => Math.round(v) });
+      const cap = $('#chart-bw').closest('figure').querySelector('figcaption');
+      if (!$('.legend', cap)) cap.insertAdjacentHTML('beforeend',
+        `<span class="legend"><span><i class="swatch" style="background:${c1()}"></i>In</span><span><i class="swatch" style="background:${c2()}"></i>Out</span></span>`);
+      const m = data.latest;
+      if (m) {
+        $('[data-k=cpu]').textContent = pct(m.cpu);
+        $('[data-k=load]').textContent = `load ${(+m.load1).toFixed(2)} · ${m.cores} core${m.cores === 1 ? '' : 's'}`;
+        $('[data-k=mem]').textContent = pct(m.mem_pct);
+        $('[data-k=mem-detail]').textContent = `${fmtBytes(m.mem_used)} of ${fmtBytes(m.mem_total)}`;
+        $('[data-k=bw]').textContent = fmtBps(m.rx_bps + m.tx_bps);
+        $('[data-k=bw-detail]').textContent = `↓ ${fmtBps(m.rx_bps)} in · ↑ ${fmtBps(m.tx_bps)} out`;
+        $('[data-k=peers]').textContent = m.active_peers;
+        $('[data-k=disk]').textContent = `disk ${Math.round(m.disk_pct)}% · ${fmtBytes(m.disk_used)} of ${fmtBytes(m.disk_total)}`;
+      }
+      const on = $('[data-k=online]');
+      on.className = `pill ${data.online ? 'on' : 'off'}`;
+      on.innerHTML = `<span class="dot${data.online ? ' live' : ''}"></span>${data.online ? 'Online' : 'Offline'} · <span data-k="seen">${data.last_seen}</span>`;
+    };
+    const load = () => fetch(`/admin/servers/${id}/metrics.json?range=${range}`).then(r => r.json()).then(draw).catch(() => {});
+    $$('[data-range]').forEach(b => b.addEventListener('click', () => {
+      range = b.dataset.range;
+      $$('[data-range]').forEach(x => x.classList.toggle('active', x === b));
+      load();
+    }));
+    window.addEventListener('resize', () => last && draw(last));
+    load();
+    poll(`/admin/servers/${id}/metrics.json?range=1h`, d => range === '1h' ? draw(d) : null, 15000);
+  }
+
   // ---------------------------------------------------------------- admin
   if (page === 'admin') {
     // Add-server wizard: build the install command from the form fields
@@ -231,6 +368,13 @@
         $$(`[data-node-active="${n.id}"]`).forEach(el => (el.textContent = n.active));
         $$(`[data-node-seen="${n.id}"]`).forEach(el => (el.textContent = n.last_seen));
         $$(`[data-node-traffic="${n.id}"]`).forEach(el => (el.textContent = n.traffic));
+        const m = data.metrics?.[n.id];
+        if (m) {
+          const mini = (pct, label) => `<span class="meter${pct >= 90 ? ' high' : pct >= 70 ? ' mid' : ''}"><i style="width:${Math.max(2, pct)}%"></i></span><span>${label}</span>`;
+          $$(`[data-node-cpu="${n.id}"]`).forEach(el => (el.innerHTML = mini(m.cpu, `${Math.round(m.cpu)}%`)));
+          $$(`[data-node-mem="${n.id}"]`).forEach(el => (el.innerHTML = mini(m.mem_pct, `${Math.round(m.mem_pct)}%`)));
+          $$(`[data-node-bw="${n.id}"]`).forEach(el => (el.textContent = fmtBps(m.rx_bps + m.tx_bps)));
+        }
       }
       const fresh = data.nodes.filter(n => !knownIds.has(String(n.id)));
       if (fresh.length) {

@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}{{ brand }} — fast, private WireGuard VPN{% endblock %}
+{% block page %}landing{% endblock %}
+
+{% block main %}
+<main class="landing">
+  <!-- hero -->
+  <section class="hero-land">
+    <div class="wrap">
+      <span class="eyebrow"><span class="dot live" style="color:var(--ok)"></span>{{ nodes|selectattr('online')|list|length }} servers online now</span>
+      <h1>Private internet,<br>without the slowdown.</h1>
+      <p class="lead">{{ brand }} encrypts everything you do online with WireGuard® — the fastest, most modern VPN protocol.
+        Pick a country, tap connect, done.</p>
+      <div class="cta">
+        {% if user %}<a class="btn primary lg" href="{{ '/admin' if user.is_admin else '/portal' }}">Go to my account</a>
+        {% else %}<a class="btn primary lg" href="#pricing">See plans</a>
+        <a class="btn lg" href="/login">Log in</a>{% endif %}
+      </div>
+      <ul class="trust">
+        <li>Works on iPhone, Android, Windows, Mac &amp; Linux</li>
+        <li>Unlimited bandwidth</li>
+        <li>Cancel anytime</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- features -->
+  <section class="wrap">
+    <div class="features">
+      <div class="feature">
+        <div class="ficon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></div>
+        <h3>Fast by design</h3>
+        <p>WireGuard is leaner than older VPN protocols, so pages load and video streams like you're not on a VPN at all.</p>
+      </div>
+      <div class="feature">
+        <div class="ficon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l8 3.3v5.6c0 4.8-3.3 8.4-8 9.7-4.7-1.3-8-4.9-8-9.7V5.3z"/></svg></div>
+        <h3>Encrypted everywhere</h3>
+        <p>Coffee-shop Wi-Fi, hotels, airports — your traffic is encrypted from your device to our server.</p>
+      </div>
+      <div class="feature">
+        <div class="ficon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9s1.3-6.4 3.8-9z"/></svg></div>
+        <h3>{{ country_count }} location{{ 's' if country_count != 1 }}, one tap apart</h3>
+        <p>Add every location to the WireGuard app once, then switch countries whenever you like.</p>
+      </div>
+      <div class="feature">
+        <div class="ficon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="3"/><path d="M11 18h2"/></svg></div>
+        <h3>Set up in 2 minutes</h3>
+        <p>No custom app to trust. Install the official WireGuard app, scan a QR code, and you're protected.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- locations -->
+  <section class="wrap" id="locations">
+    <div class="center-head">
+      <h2>Server locations</h2>
+      <p class="muted">Live status — every plan includes every location.</p>
+    </div>
+    {% if nodes %}
+    <div class="loc-grid">
+      {% for n in nodes %}
+      <div class="loc{{ ' off' if not n.online }}">
+        <span class="flag sm">{{ n.country|flag }}</span>
+        <div><b>{{ n.location or n.name }}</b><div class="muted small">{{ n.country_name or n.name }}</div></div>
+        <span class="pill {{ 'on' if n.online else 'off' }}" style="margin-left:auto">{{ 'Online' if n.online else 'Maintenance' }}</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="muted" style="text-align:center">New locations are launching soon.</p>
+    {% endif %}
+  </section>
+
+  <!-- pricing -->
+  <section class="wrap" id="pricing">
+    <div class="center-head">
+      <h2>Simple pricing</h2>
+      <p class="muted">Add as many devices as you like. Plans differ by how many can be connected at the same time.</p>
+    </div>
+    <div class="plans">
+      {% for key, p in plans.items() %}
+      <div class="card plan{{ ' featured' if key == 'pro' }}">
+        {% if key == 'pro' %}<span class="ribbon">Best value</span>{% endif %}
+        <h2>{{ p.name }}</h2>
+        <div class="price">{{ price_labels[key] or '&nbsp;'|safe }}</div>
+        <div class="devices-big"><b>{{ p.devices }}</b> device{{ 's' if p.devices != 1 }} at a time</div>
+        <ul class="perks">
+          <li>{% if p.devices == 1 %}Use it on one device at a time{% else %}Phone, laptop, tablet &amp; more — all at once{% endif %}</li>
+          <li>Every server location</li>
+          <li>Unlimited bandwidth</li>
+          <li>WireGuard® encryption</li>
+        </ul>
+        {% if user %}
+        <a class="btn block {{ 'primary' if key == 'pro' }}" href="/portal">Choose {{ p.name }}</a>
+        {% elif open_signup %}
+        <a class="btn block {{ 'primary' if key == 'pro' }}" href="/signup?plan={{ key }}">Get {{ p.name }}</a>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <!-- faq -->
+  <section class="wrap narrow" id="faq">
+    <div class="center-head"><h2>Questions</h2></div>
+    <details class="faq"><summary>What does "devices at a time" mean?</summary>
+      <p>You can set up {{ brand }} on as many phones, tablets and computers as you like. Your plan decides how many of them can be connected at the same moment — Basic allows {{ plans.basic.devices }}, Pro allows {{ plans.pro.devices }}. Switching is instant: disconnect one, connect another.</p></details>
+    <details class="faq"><summary>Which apps do I need?</summary>
+      <p>Just the free, official WireGuard app for your device. After you subscribe you'll get a QR code or file for each location — import it and flip the switch.</p></details>
+    <details class="faq"><summary>Can I change or cancel my plan?</summary>
+      <p>Yes, anytime from your account. Upgrades take effect immediately (you only pay the difference); cancellations stop the next renewal.</p></details>
+    <details class="faq"><summary>How do you handle my data?</summary>
+      <p>Your connection to our servers is always encrypted. See our privacy policy for exactly what we record and how long we keep it.</p></details>
+  </section>
+
+  <section class="wrap">
+    <div class="card final-cta">
+      <h2>Ready when you are.</h2>
+      <p class="muted">Get protected in the next two minutes.</p>
+      <a class="btn primary lg" href="{{ ('/admin' if user.is_admin else '/portal') if user else '#pricing' }}">{{ 'Go to my account' if user else 'Choose a plan' }}</a>
+    </div>
+  </section>
+
+  <footer class="wrap footer">
+    <span>© {{ brand }}</span>
+    <span class="muted">WireGuard is a registered trademark of Jason A. Donenfeld.</span>
+  </footer>
+</main>
+{% endblock %}
