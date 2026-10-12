@@ -182,11 +182,9 @@
     document.addEventListener('click', e => {
       const el = e.target.closest('[data-config-node]');
       if (!el || !pick || el.dataset.confirmed) return;
+      // only configs handed out before this visit: a repeat click now is almost always the same machine
       const done = downloaded[pick.value] || [];
-      if (!done.includes(+el.dataset.configNode)) {
-        done.push(+el.dataset.configNode); downloaded[pick.value] = done;  // first time: fine
-        return;
-      }
+      if (!done.includes(+el.dataset.configNode)) return;
       e.preventDefault(); e.stopImmediatePropagation();
       pendingConfig = el;
       $('[data-k=dup-device]').textContent = pick.selectedOptions[0].textContent;

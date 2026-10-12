@@ -339,3 +339,11 @@ def test_downloads_are_remembered_per_device_and_location(client):
     page = client.get("/portal").text
     assert f"data-downloaded='{{&#34;{dev['id']}&#34;: [2]}}'" in page or f'"{dev["id"]}": [2]' in page
     assert "New device…" in page and "Setting up another phone or computer?" in page
+
+
+def test_device_shows_what_it_downloaded_before_connecting(client):
+    add_node(client, "STL1")
+    dev = _pro_customer(client)
+    client.get(f"/portal/config/1.conf?device={dev['id']}")
+    page = client.get("/portal").text
+    assert "Downloaded STL1 — not connected yet" in page and "not per location" in page

@@ -369,6 +369,7 @@ def user_devices(conn, user):
         d["shared"] = now - d["shared_at"] < 3600
         d["downloaded"] = [r[0] for r in conn.execute(
             "SELECT node_id FROM device_downloads WHERE device_id = ?", (d["id"],))]
+        d["downloaded_names"] = [nodes[i] for i in d["downloaded"] if i in nodes]
         d["blocked"] = not d["kicked"] and d["id"] not in allowed  # waiting for a free slot
     return devices
 

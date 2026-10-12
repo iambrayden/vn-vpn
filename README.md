@@ -23,7 +23,7 @@ A self-hosted, resellable WireGuard VPN suite:
     └── WireGuard app ──────┼──────────────── tunnel ─────────────────────────▶ any VPS
 ```
 
-- Every **device** a customer adds gets its own WireGuard keypair and tunnel IP (`10.66.x.y`), valid on **all** servers. Switching server = activating another tunnel in the WireGuard app.
+- Every **device** (one per phone or computer) gets its own WireGuard keypair and can use **every** location. Each server has its own address range (`10.64.0.0/16`, `10.65.0.0/16`, … from `VPN_POOL`), so a device's tunnels to different locations never overlap. Switching server = activating another tunnel in the WireGuard app.
 - Agents pull the list of devices allowed right now: paying (or admin-granted) users only, capped at the plan's simultaneous-connection limit across all servers. When the limit is reached, the devices already connected keep their slots; another device can connect once one goes idle (~3 min) or the customer hits **Disconnect** in the portal (~15 s). Suspended, cancelled or deleted users drop off every server within ~15 seconds.
 - Servers and tunnels are **IPv4-only**. Client configs also route IPv6 into the tunnel, where it's dropped, so it can't leak around the VPN. Configs use MTU 1380 and servers clamp TCP MSS, which avoids "connected but nothing loads" on mobile/PPPoE networks.
 - Each server's private key is generated on the server and never leaves it. Agents authenticate with a per-node secret issued at enrollment.

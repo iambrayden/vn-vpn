@@ -99,6 +99,7 @@
             {% elif d.kicked %}<span class="muted">Disconnected from here — can reconnect in a few minutes</span>
             {% elif d.blocked %}<span class="warn-text">Can't connect — all your connections are in use</span>
             {% elif d.last_handshake %}<span class="muted">Last connected {{ d.last_handshake|ago }}</span>
+            {% elif d.downloaded %}<span class="muted">Downloaded {{ d.downloaded_names|join(', ') }} — not connected yet</span>
             {% else %}<span class="muted">Not set up yet — <a href="/portal?device={{ d.id }}#locations">download a location</a></span>{% endif %}
           </div>
         </div>
@@ -275,9 +276,10 @@
 <dialog id="dup-config">
   <div class="dlg-head"><h2>Setting up another phone or computer?</h2><button type="button" class="btn ghost icon" data-close aria-label="Close">✕</button></div>
   <div class="dlg-body">
-    <p style="margin-top:14px"><b data-k="dup-device"></b> already has this location. Each config can only be used on <b>one</b> machine —
+    <p style="margin-top:14px"><b data-k="dup-device"></b> already downloaded this location earlier. A config works on <b>one</b> machine —
       two machines sharing it knock each other offline.</p>
-    <p class="muted small">Re-downloading is fine if you're re-installing on the same machine.</p>
+    <p class="muted small">Re-installing on the same machine? Download again. Adding a different phone or computer? Add it as a new device.
+      (One device can have every location — you don't need a device per location.)</p>
   </div>
   <div class="dlg-foot">
     <button type="button" class="btn" id="dup-continue">Same machine — download again</button>
@@ -289,7 +291,8 @@
   <form method="post" action="/portal/devices">
     <div class="dlg-head"><h2>Add a device</h2><button type="button" class="btn ghost icon" data-close aria-label="Close">✕</button></div>
     <div class="dlg-body">
-      <p class="muted small" style="margin-top:14px">Each device gets its own key, so you can remove one (if it's lost) without touching the others.
+      <p class="muted small" style="margin-top:14px">Add one device per phone or computer — not per location: each device can use every location.
+        Each device gets its own key, so you can remove one (if it's lost) without touching the others.
         Add as many devices as you like; {{ limit }} can be connected at the same time.</p>
       <label>Device name <input name="name" id="device-name" maxlength="40" placeholder="e.g. Sam's iPhone" required></label>
     </div>
