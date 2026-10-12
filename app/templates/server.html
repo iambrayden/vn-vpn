@@ -17,8 +17,22 @@
           · agent v{{ n.agent_version or '?' }}{% if m %} · up {{ m.uptime|duration }}{% endif %}</div>
       </div>
     </div>
+    <div class="toolbar">
+    <form method="post" action="/admin/nodes/{{ n.id }}/reenroll"{% if n.online and not reenroll %} data-confirm="{{ n.name }} is online. Re-enrolling gives it new credentials — only needed if it was reinstalled, rebuilt or is being rejected by the panel. Continue?" data-confirm-label="Create command"{% endif %}>
+      <button class="btn sm">{{ 'New re-enroll command' if reenroll else 'Re-enroll' }}</button></form>
     <span class="pill {{ 'on' if n.online else 'off' }}" data-k="online"><span class="dot{{ ' live' if n.online }}"></span>{{ 'Online' if n.online else 'Offline' }} · <span data-k="seen">{{ n.last_seen|ago }}</span></span>
+    </div>
   </div>
+
+  {% if reenroll %}
+  <div class="card" id="reenroll" data-reenroll-pending="1">
+    <h3>Re-enroll {{ n.name }}</h3>
+    <p class="muted small" style="margin:0">Run this as root on the server (or on a rebuilt replacement). It reconnects to this same entry —
+      name, location, flag, stats and logs are kept; the key, IP and credentials are refreshed. One-time use, expires in {{ (reenroll.expires_in / 60)|round|int }} min.</p>
+    <div class="cmd"><code id="reenroll-cmd">{{ reenroll.cmd }}</code><button class="btn sm" data-copy="#reenroll-cmd">Copy</button></div>
+    <div class="waiting" id="reenroll-waiting"><span class="spinner"></span>Waiting for the server to re-enroll…</div>
+  </div>
+  {% endif %}
 
   {% if n.agent_error %}
   <div class="card notice warn"><div>

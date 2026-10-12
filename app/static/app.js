@@ -312,6 +312,15 @@
       on.innerHTML = `<span class="dot${data.online ? ' live' : ''}"></span>${data.online ? 'Online' : 'Offline'} · <span data-k="seen">${data.last_seen}</span>`;
     };
     const load = () => fetch(`/admin/servers/${id}/metrics.json?range=${range}`).then(r => r.json()).then(draw).catch(() => {});
+    // re-enroll card: notice when the one-time command has been used
+    const re = $('[data-reenroll-pending]');
+    if (re) poll(`/admin/servers/${id}/metrics.json?range=1h`, d => {
+      if (d.reenroll === 'pending') return;
+      const w = $('#reenroll-waiting');
+      if (d.reenroll === 'used') { w.classList.add('done'); w.textContent = '✓ Re-enrolled — reloading…'; }
+      else { w.textContent = 'This command expired — reloading…'; }
+      setTimeout(() => location.replace(location.pathname), 1500);
+    }, 4000);
     $$('[data-range]').forEach(b => b.addEventListener('click', () => {
       range = b.dataset.range;
       $$('[data-range]').forEach(x => x.classList.toggle('active', x === b));

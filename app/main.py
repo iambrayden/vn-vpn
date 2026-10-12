@@ -688,7 +688,8 @@ def admin(request: Request):
                    COUNT(DISTINCT d.id) device_count
             FROM users u LEFT JOIN devices d ON d.user_id = u.id LEFT JOIN device_stats s ON s.device_id = d.id
             GROUP BY u.id ORDER BY u.id DESC""")]
-        tokens = conn.execute("SELECT * FROM enroll_tokens WHERE revoked = 0 ORDER BY created_at DESC").fetchall()
+        tokens = conn.execute("""SELECT * FROM enroll_tokens WHERE revoked = 0 AND node_id IS NULL
+                                 ORDER BY created_at DESC""").fetchall()
         sessions = live_sessions(conn)
         metrics = monitoring.latest_metrics(conn)
     for n in nodes:
@@ -716,7 +717,9 @@ def admin_server(request: Request, node_id: int):
         m = monitoring.latest_metrics(conn).get(node_id)
         recent = conn.execute("""SELECT * FROM sessions WHERE node_id = ? ORDER BY last_seen DESC LIMIT 15""",
                               (node_id,)).fetchall()
-    return render(request, "server.html", n=node, m=m, recent=recent, now_ts=time.time(),
+    with db.session() as conn:
+        reenroll = reenroll_command(conn, request, node_id)
+    return render(request, "server.html", n=node, m=m, recent=recent, now_ts=time.time(), reenroll=reenroll,
                   agent_version=AGENT_VERSION, has_stats=version_tuple(node["agent_version"]) >= (0, 3, 0),
                   self_updates=version_tuple(node["agent_version"]) >= (0, 2, 0))
 
@@ -735,6 +738,10 @@ def admin_server_metrics(request: Request, node_id: int, range: str = "1h"):
         data = monitoring.series(conn, node_id, range)
         data["latest"] = monitoring.latest_metrics(conn).get(node_id)
         data["online"] = node_online(node)
+        last_tok = conn.execute("""SELECT uses, max_uses, expires_at, revoked FROM enroll_tokens WHERE node_id = ?
+                                   ORDER BY created_at DESC LIMIT 1""", (node_id,)).fetchone()
+        data["reenroll"] = ("" if not last_tok else "used" if last_tok["uses"] >= last_tok["max_uses"]
+                            else "expired" if last_tok["revoked"] or last_tok["expires_at"] < time.time() else "pending")
         data["last_seen"] = ago(node["last_seen"])
     return data
 
@@ -838,6 +845,34 @@ def admin_update_node(request: Request, node_id: int, name: str = Form(...), loc
                       int(bool(enabled)), node_id))
     flash(request, f"Saved {name.strip()}.")
     return RedirectResponse("/admin#servers", status_code=303)
+
+
+REENROLL_TTL = 3600
+
+
+def reenroll_command(conn, request: Request, node_id: int) -> dict | None:
+    """The newest still-usable re-enroll command for a server, if any."""
+    tok = conn.execute("""SELECT * FROM enroll_tokens WHERE node_id = ? AND revoked = 0 AND uses < max_uses
+                          AND expires_at > ? ORDER BY created_at DESC LIMIT 1""", (node_id, time.time())).fetchone()
+    if not tok:
+        return None
+    return {"cmd": f"curl -fsSL {panel_url(request)}/agent/install.sh | sudo bash -s -- --token {tok['token']}",
+            "expires_in": int(tok["expires_at"] - time.time())}
+
+
+@app.post("/admin/nodes/{node_id}/reenroll")
+def admin_reenroll_node(request: Request, node_id: int):
+    """Create a one-time command that reconnects this server (or a rebuilt replacement) to the same entry."""
+    require_admin(request)
+    with db.session() as conn:
+        node = conn.execute("SELECT name FROM nodes WHERE id = ?", (node_id,)).fetchone()
+        if not node:
+            raise HTTPException(404, "Server not found.")
+        conn.execute("UPDATE enroll_tokens SET revoked = 1 WHERE node_id = ?", (node_id,))  # one live command
+        conn.execute("""INSERT INTO enroll_tokens (token, label, max_uses, node_id, expires_at)
+                        VALUES (?,?,1,?,?)""",
+                     (secrets.token_urlsafe(24), f"Re-enroll {node['name']}", node_id, int(time.time()) + REENROLL_TTL))
+    return RedirectResponse(f"/admin/servers/{node_id}#reenroll", status_code=303)
 
 
 @app.post("/admin/nodes/{node_id}/toggle")
@@ -1029,15 +1064,35 @@ async def agent_register(request: Request):
         tok = conn.execute("SELECT * FROM enroll_tokens WHERE token = ? AND revoked = 0", (token,)).fetchone()
         if not tok or (tok["max_uses"] is not None and tok["uses"] >= tok["max_uses"]):
             raise HTTPException(401, "Invalid, revoked or used-up enrollment token")
+        if tok["expires_at"] and tok["expires_at"] < time.time():
+            raise HTTPException(401, "This enrollment command has expired; create a new one in the admin panel")
         endpoint = (body.get("endpoint") or client_ip_of(request)).strip()
         if not crypto.valid_endpoint(endpoint):
             raise HTTPException(400, f"'{endpoint}' isn't a public IPv4 address or hostname. "
                                      "Servers are IPv4-only; re-run the installer with --endpoint <IPv4>.")
         hostname = str(body.get("hostname", ""))[:100]
         secret = secrets.token_urlsafe(32)
+        target = None
+        if tok["node_id"]:
+            # one-time re-enroll command for a specific server: keep its name, location, stats and logs,
+            # take the (possibly new) key, IP and port of whatever box ran the command
+            target = conn.execute("SELECT id FROM nodes WHERE id = ?", (tok["node_id"],)).fetchone()
+            if not target:
+                raise HTTPException(404, "The server this command was created for has been removed")
+            clash = conn.execute("SELECT name FROM nodes WHERE public_key = ? AND id != ?",
+                                 (public_key, target["id"])).fetchone()
+            if clash:
+                raise HTTPException(409, f"This machine is already enrolled as '{clash['name']}'. "
+                                         "Remove that server first, or re-enroll it instead.")
         # Re-enrolling the same box (same public key) replaces the old record instead of duplicating it.
-        existing = conn.execute("SELECT id FROM nodes WHERE public_key = ?", (public_key,)).fetchone()
-        if existing:
+        existing = target or conn.execute("SELECT id FROM nodes WHERE public_key = ?", (public_key,)).fetchone()
+        if target:
+            conn.execute("""UPDATE nodes SET public_key=?, secret_hash=?, endpoint_host=?, listen_port=?, hostname=?,
+                            agent_error='' WHERE id=?""",
+                         (public_key, crypto.sha256(secret), endpoint, int(body.get("listen_port", 51820)),
+                          hostname, target["id"]))
+            node_id = target["id"]
+        elif existing:
             conn.execute("UPDATE nodes SET secret_hash=?, endpoint_host=?, listen_port=?, hostname=? WHERE id=?",
                          (crypto.sha256(secret), endpoint, int(body.get("listen_port", 51820)), hostname,
                           existing["id"]))

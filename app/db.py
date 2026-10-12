@@ -174,6 +174,8 @@ MIGRATIONS = [
     ("users", "period_end", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "cancel_at_period_end", "INTEGER NOT NULL DEFAULT 0"),
     ("nodes", "agent_error", "TEXT NOT NULL DEFAULT ''"),          # last problem the agent reported
+    ("enroll_tokens", "node_id", "INTEGER"),                        # set = one-time re-enroll for that server
+    ("enroll_tokens", "expires_at", "INTEGER"),                     # unix time; NULL = never
 ]
 
 

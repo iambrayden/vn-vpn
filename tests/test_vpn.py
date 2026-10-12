@@ -89,3 +89,65 @@ def test_devices_are_unlimited_by_default(client):
 def test_static_assets_are_cache_busted_by_content(client):
     page = client.get("/login").text
     assert f"/static/app.js?v={main.templates.env.globals['asset_v']['app.js']}" in page
+
+
+def _admin(client):
+    with db.session() as conn:
+        main.create_user(conn, "boss@example.com", "adminpass123", is_admin=True)
+    client.post("/login", data={"email": "boss@example.com", "password": "adminpass123"})
+
+
+def _reenroll_token(client, node_id=1):
+    client.post(f"/admin/nodes/{node_id}/reenroll")
+    with db.session() as conn:
+        return conn.execute("SELECT token FROM enroll_tokens WHERE node_id = ? AND revoked = 0", (node_id,)).fetchone()[0]
+
+
+def test_reenroll_keeps_server_entry_and_rotates_credentials(client):
+    old_secret = add_node(client, "Chicago", "US")
+    with db.session() as conn:
+        conn.execute("UPDATE nodes SET location = 'Chicago, IL' WHERE id = 1")
+    _admin(client)
+    tok = _reenroll_token(client)
+    page = client.get("/admin/servers/1").text
+    assert f"--token {tok}" in page and "Re-enroll Chicago" in page
+    assert client.get("/admin/servers/1/metrics.json").json()["reenroll"] == "pending"
+    _, new_pub = crypto.wg_keypair()  # e.g. the server was rebuilt
+    r = client.post("/api/agent/register", json={"token": tok, "name": "some-hostname", "endpoint": "5.6.7.8",
+                                                  "public_key": new_pub, "hostname": "chi"})
+    assert r.status_code == 200 and r.json()["node_id"] == 1
+    with db.session() as conn:
+        n = conn.execute("SELECT * FROM nodes").fetchall()
+    assert len(n) == 1 and (n[0]["name"], n[0]["location"], n[0]["country"]) == ("Chicago", "Chicago, IL", "US")
+    assert (n[0]["public_key"], n[0]["endpoint_host"]) == (new_pub, "5.6.7.8")
+    assert client.post("/api/agent/sync", json={"peers": []}, headers={"Authorization": f"Bearer {old_secret}"}).status_code == 401
+    assert sync(client, r.json()["secret"]) == set()
+    assert client.get("/admin/servers/1/metrics.json").json()["reenroll"] == "used"
+    # one-time
+    _, other = crypto.wg_keypair()
+    assert client.post("/api/agent/register", json={"token": tok, "endpoint": "5.6.7.9", "public_key": other}).status_code == 401
+
+
+def test_reenroll_command_expires_and_is_hidden_from_wizard(client):
+    add_node(client, "Chicago")
+    _admin(client)
+    tok = _reenroll_token(client)
+    assert tok not in client.get("/admin").text  # not listed as a general enrollment token
+    with db.session() as conn:
+        conn.execute("UPDATE enroll_tokens SET expires_at = 1 WHERE token = ?", (tok,))
+    _, pub = crypto.wg_keypair()
+    r = client.post("/api/agent/register", json={"token": tok, "endpoint": "5.6.7.8", "public_key": pub})
+    assert r.status_code == 401 and "expired" in r.json()["detail"]
+    assert client.get("/admin/servers/1/metrics.json").json()["reenroll"] == "expired"
+
+
+def test_reenroll_refuses_a_machine_enrolled_as_another_server(client):
+    add_node(client, "A")
+    with db.session() as conn:
+        conn.execute("INSERT OR IGNORE INTO enroll_tokens (token) VALUES ('tok')")
+    _, pub_b = crypto.wg_keypair()
+    client.post("/api/agent/register", json={"token": "tok", "name": "B", "endpoint": "9.9.9.9", "public_key": pub_b})
+    _admin(client)
+    tok = _reenroll_token(client, 1)
+    r = client.post("/api/agent/register", json={"token": tok, "endpoint": "9.9.9.9", "public_key": pub_b})
+    assert r.status_code == 409 and "'B'" in r.json()["detail"]

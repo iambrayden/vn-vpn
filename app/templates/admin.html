@@ -111,6 +111,7 @@
         <button class="btn sm" data-open="edit-node-{{ n.id }}">Edit</button>
         <details class="menu row-menu"><summary class="btn sm ghost" aria-label="More actions">•••</summary>
           <div class="menu-pop">
+            <form method="post" action="/admin/nodes/{{ n.id }}/reenroll"><button>Re-enroll…</button></form>
             <form method="post" action="/admin/nodes/{{ n.id }}/toggle"><button>{{ 'Hide from customers' if n.enabled else 'Show to customers' }}</button></form>
             <form method="post" action="/admin/nodes/{{ n.id }}/delete" data-confirm="Remove {{ n.name }}? Its agent will stop syncing and customers lose this location." data-confirm-label="Remove server">
               <button style="color:var(--bad)">Remove server</button></form>

@@ -84,6 +84,8 @@ Metrics are kept `METRICS_DAYS` (7). Old rows are deleted hourly.
 
 Agents update themselves when the panel is redeployed with a newer agent.
 
+**Re-enroll a server** (reinstalled OS, rebuilt VPS, new IP, or the panel rejects it with "Unknown node"): **Admin → Servers → ••• → Re-enroll…** (or the button on the server's page) gives a one-time command, valid for an hour. Run it on the box; it reconnects to the same entry — name, location, flag, stats and logs are kept, and the key, IP and credentials are refreshed. No need to delete and re-add.
+
 **Troubleshooting** — if a client shows "connected" but no traffic passes, run this on the server:
 ```bash
 sudo python3 /opt/vnvpn/agent.py doctor
