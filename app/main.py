@@ -160,6 +160,11 @@ def panel_url(request: Request) -> str:
 
 
 def client_ip_of(request: Request) -> str:
+    # Behind Cloudflare, X-Forwarded-For / X-Real-IP set by the reverse proxy hold Cloudflare's address;
+    # CF-Connecting-IP holds the real client.
+    for header in ("cf-connecting-ip", "true-client-ip"):
+        if request.headers.get(header):
+            return request.headers[header].strip()
     fwd = request.headers.get("x-forwarded-for")
     if fwd:
         return fwd.split(",")[0].strip()
@@ -695,9 +700,9 @@ def admin(request: Request):
     for n in nodes:
         n["m"] = metrics.get(n["id"])
         try:
-            n["private_ip"] = ipaddress.ip_address(n["endpoint_host"]).is_private
+            n["endpoint_problem"] = crypto.endpoint_problem(n["endpoint_host"])
         except ValueError:
-            n["private_ip"] = False
+            n["endpoint_problem"] = ""
     return render(request, "admin.html", nodes=nodes, users=users, tokens=tokens, sessions=sessions,
                   panel=panel_url(request), now_ts=now_utc().timestamp(),
                   provision_enabled=bool(PROVISION_API_KEY), billing_enabled=billing.enabled(),
@@ -838,6 +843,10 @@ def admin_update_node(request: Request, node_id: int, name: str = Form(...), loc
     require_admin(request)
     if not crypto.valid_endpoint(endpoint_host):
         flash(request, f"'{endpoint_host}' isn't an IPv4 address or hostname — servers are IPv4-only.", "error")
+        return RedirectResponse("/admin#servers", status_code=303)
+    if crypto.endpoint_problem(endpoint_host):
+        flash(request, f"{endpoint_host} is a {crypto.endpoint_problem(endpoint_host)} — clients can't reach the "
+                       "server there. Use the server's own public IPv4.", "error")
         return RedirectResponse("/admin#servers", status_code=303)
     with db.session() as conn:
         conn.execute("UPDATE nodes SET name=?, location=?, country=?, endpoint_host=?, enabled=? WHERE id=?",
@@ -1070,6 +1079,9 @@ async def agent_register(request: Request):
         if not crypto.valid_endpoint(endpoint):
             raise HTTPException(400, f"'{endpoint}' isn't a public IPv4 address or hostname. "
                                      "Servers are IPv4-only; re-run the installer with --endpoint <IPv4>.")
+        if crypto.endpoint_problem(endpoint) == "Cloudflare IP":
+            raise HTTPException(400, f"{endpoint} is a Cloudflare address, not this server. "
+                                     "Re-run the installer with --endpoint <this server's public IPv4>.")
         hostname = str(body.get("hostname", ""))[:100]
         secret = secrets.token_urlsafe(32)
         target = None
@@ -1129,6 +1141,14 @@ async def agent_sync(request: Request, authorization: str | None = Header(None))
         conn.execute("UPDATE nodes SET last_seen = ?, agent_version = ?, agent_error = ? WHERE id = ?",
                      (now_utc().strftime("%Y-%m-%dT%H:%M:%S"), str(body.get("agent_version", ""))[:20],
                       str(body.get("last_error") or "")[:500], node["id"]))
+        # The agent reports the public IPv4 it sees on its own interface. If the stored endpoint is clearly
+        # wrong (a Cloudflare or private address), correct it so client configs point at the real server.
+        reported = str(body.get("public_ip") or "").strip()
+        if (reported and crypto.endpoint_problem(node["endpoint_host"]) and crypto.valid_endpoint(reported)
+                and not crypto.endpoint_problem(reported)):
+            conn.execute("UPDATE nodes SET endpoint_host = ? WHERE id = ?", (reported, node["id"]))
+            log.warning("node %s: endpoint %s -> %s (reported by agent)", node["id"], node["endpoint_host"], reported)
+            node = conn.execute("SELECT * FROM nodes WHERE id = ?", (node["id"],)).fetchone()
 
     peers_in = [p for p in body.get("peers") or [] if isinstance(p, dict)]
     now = int(time.time())

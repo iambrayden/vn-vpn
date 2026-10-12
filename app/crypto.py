@@ -69,6 +69,27 @@ def allocate_address(conn) -> str:
     return client_ip(offset)
 
 
+# Cloudflare's proxy ranges (https://www.cloudflare.com/ips-v4). A server "endpoint" in here means the panel
+# saw Cloudflare instead of the server - WireGuard can't go through Cloudflare's proxy.
+CLOUDFLARE_V4 = [ipaddress.ip_network(n) for n in (
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "141.101.64.0/18",
+    "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20", "197.234.240.0/22", "198.41.128.0/17",
+    "162.158.0.0/15", "104.16.0.0/13", "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22")]
+
+
+def endpoint_problem(host: str) -> str:
+    """'' if clients can reach this IPv4 endpoint, else a short reason ('Cloudflare IP', 'Private IP')."""
+    try:
+        ip = ipaddress.ip_address(host.strip())
+    except ValueError:
+        return ""  # hostname: can't judge here
+    if any(ip in net for net in CLOUDFLARE_V4):
+        return "Cloudflare IP"
+    if not ip.is_global:
+        return "Private IP"
+    return ""
+
+
 def valid_endpoint(host: str) -> bool:
     """Servers are IPv4-only: a public IPv4 address or a hostname (which should resolve to one)."""
     host = host.strip()

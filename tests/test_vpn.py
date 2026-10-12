@@ -151,3 +151,67 @@ def test_reenroll_refuses_a_machine_enrolled_as_another_server(client):
     tok = _reenroll_token(client, 1)
     r = client.post("/api/agent/register", json={"token": tok, "endpoint": "9.9.9.9", "public_key": pub_b})
     assert r.status_code == 409 and "'B'" in r.json()["detail"]
+
+
+def test_whoami_sees_through_cloudflare(client):
+    r = client.get("/api/agent/whoami", headers={"CF-Connecting-IP": "203.0.113.50",
+                                                  "X-Forwarded-For": "104.23.253.123", "X-Real-IP": "104.23.253.123"})
+    assert r.json()["ip"] == "203.0.113.50"
+
+
+def test_register_refuses_cloudflare_endpoint(client):
+    with db.session() as conn:
+        conn.execute("INSERT INTO enroll_tokens (token) VALUES ('tok')")
+    _, pub = crypto.wg_keypair()
+    r = client.post("/api/agent/register", json={"token": "tok", "endpoint": "104.23.253.123", "public_key": pub})
+    assert r.status_code == 400 and "Cloudflare" in r.json()["detail"]
+
+
+def test_agent_reported_ip_repairs_cloudflare_endpoint(client):
+    """The production bug: servers registered at Cloudflare's address. The next check-in fixes them."""
+    secret = add_node(client, "CHI1", "US")
+    with db.session() as conn:
+        conn.execute("UPDATE nodes SET endpoint_host = '104.23.253.123'")
+    _admin(client)
+    assert "Cloudflare IP" in client.get("/admin").text
+    r = client.post("/api/agent/sync", json={"peers": [], "public_ip": "45.79.10.20"},
+                    headers={"Authorization": f"Bearer {secret}"}).json()
+    assert r["endpoint"] == "45.79.10.20"
+    with db.session() as conn:
+        assert conn.execute("SELECT endpoint_host FROM nodes").fetchone()[0] == "45.79.10.20"
+    assert "Cloudflare IP" not in client.get("/admin").text
+
+
+def test_reported_ip_never_overrides_a_good_endpoint(client):
+    secret = add_node(client)  # 1.2.3.4, fine
+    with db.session() as conn:
+        conn.execute("UPDATE nodes SET endpoint_host = 'vpn-chi.example.com'")
+    client.post("/api/agent/sync", json={"peers": [], "public_ip": "45.79.10.20"},
+                headers={"Authorization": f"Bearer {secret}"})
+    with db.session() as conn:
+        assert conn.execute("SELECT endpoint_host FROM nodes").fetchone()[0] == "vpn-chi.example.com"
+
+
+def test_admin_cannot_set_cloudflare_endpoint(client):
+    add_node(client)
+    _admin(client)
+    client.post("/admin/nodes/1", data={"name": "N", "endpoint_host": "172.70.142.153"})
+    with db.session() as conn:
+        assert conn.execute("SELECT endpoint_host FROM nodes").fetchone()[0] == "1.2.3.4"
+
+
+def test_agent_finds_its_public_ip_on_the_interface(monkeypatch):
+    monkeypatch.setattr(agent, "sh", lambda *a, **k: "1.1.1.1 via 104.23.0.1 dev eth0 src 45.79.10.20 uid 0")
+    assert agent.detect_public_ipv4() == "45.79.10.20"
+
+
+def test_agent_skips_private_interface_ip_and_asks_outside(monkeypatch):
+    monkeypatch.setattr(agent, "sh", lambda *a, **k: "1.1.1.1 via 10.0.0.1 dev eth0 src 10.0.0.5 uid 0")
+
+    class Resp:
+        def __init__(self, body): self.body = body
+        def read(self): return self.body
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+    monkeypatch.setattr(agent.urllib.request, "urlopen", lambda req, timeout=0: Resp(b"66.42.100.7\n"))
+    assert agent.detect_public_ipv4() == "66.42.100.7"

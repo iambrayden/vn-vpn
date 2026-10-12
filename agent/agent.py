@@ -11,6 +11,7 @@ peers this node should accept, then applies it with `wg syncconf` (no tunnel int
 The node's private key never leaves the server.
 """
 import argparse
+import ipaddress
 import json
 import os
 import socket
@@ -22,7 +23,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.3.3"
+VERSION = "0.4.0"
 CONF_DIR = os.environ.get("VNVPN_DIR", "/etc/vnvpn")
 CONF_FILE = os.path.join(CONF_DIR, "agent.json")
 KEY_FILE = os.path.join(CONF_DIR, "private.key")
@@ -78,6 +79,47 @@ def default_iface():
         return "eth0"
 
 
+def _is_public_v4(ip):
+    try:
+        a = ipaddress.ip_address(ip)
+        return a.version == 4 and a.is_global
+    except ValueError:
+        return False
+
+
+def detect_public_ipv4(panel=None):
+    """This server's public IPv4, without trusting the panel's view (which may be a proxy like Cloudflare).
+
+    1. the source address the kernel uses for internet traffic (most VPSes have the public IP on the NIC)
+    2. a couple of plain "what is my IP" services
+    3. the panel's /whoami as a last resort
+    """
+    try:
+        out = sh("ip", "-4", "-o", "route", "get", "1.1.1.1").split()
+        src = out[out.index("src") + 1]
+        if _is_public_v4(src):
+            return src
+    except Exception:
+        pass
+    for url in ("https://api.ipify.org", "https://ipv4.icanhazip.com", "https://checkip.amazonaws.com"):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": f"vnvpn-agent/{VERSION}"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                ip = resp.read().decode().strip()
+            if _is_public_v4(ip):
+                return ip
+        except Exception:
+            continue
+    if panel:
+        try:
+            ip = http("GET", f"{panel}/api/agent/whoami", ipv4_only=True)["ip"]
+            if _is_public_v4(ip):
+                return ip
+        except Exception:
+            pass
+    return ""
+
+
 # --------------------------------------------------------------------------- enroll
 
 def enroll(args):
@@ -87,13 +129,9 @@ def enroll(args):
     endpoint = args.endpoint
     if not endpoint:
         # IPv4 only: many client networks have no IPv6, so servers are always reached over IPv4
-        try:
-            endpoint = http("GET", f"{panel}/api/agent/whoami", ipv4_only=True)["ip"]
-        except OSError as e:
-            sys.exit(f"Could not reach the panel over IPv4 ({e}). This server needs a public IPv4 address; "
-                     "pass --endpoint <IPv4> if it has one.")
-        if ":" in endpoint:
-            sys.exit(f"The panel saw this server as {endpoint} (IPv6). Pass --endpoint <public IPv4>.")
+        endpoint = detect_public_ipv4(panel)
+        if not endpoint:
+            sys.exit("Couldn't find this server's public IPv4 address. Pass --endpoint <public IPv4>.")
     res = http("POST", f"{panel}/api/agent/register", {
         "token": args.token,
         "name": args.name or socket.gethostname(),
@@ -416,11 +454,14 @@ def run(args):
         log(f"server stats unavailable: {e}")
         metrics = None
     flows, unsent_flows, last_error, flow_failed = None, [], "", False
+    public_ip, public_ip_at = "", 0.0
     while True:
         try:
             peers = peer_stats(conf["interface"])
             now = time.time()
-            body = {"agent_version": VERSION, "peers": peers, "last_error": last_error}
+            if not DRY_RUN and time.time() - public_ip_at > 3600:
+                public_ip, public_ip_at = detect_public_ipv4(), time.time()
+            body = {"agent_version": VERSION, "peers": peers, "last_error": last_error, "public_ip": public_ip}
             if metrics:
                 try:
                     body["metrics"] = metrics.sample(sum(1 for p in peers if now - p["handshake"] < 180))
@@ -535,10 +576,7 @@ def doctor(_args):
         print(f"    (FORWARD policy is DROP — fine as long as the rule above is present)")
 
     endpoint = desired.get("endpoint", "")
-    try:
-        my_ip = http("GET", f"{conf['panel']}/api/agent/whoami", ipv4_only=True)["ip"]
-    except Exception:
-        my_ip = ""
+    my_ip = detect_public_ipv4(conf["panel"])
     if endpoint:
         check(":" not in endpoint, f"clients connect to {endpoint}:{conf['listen_port']}",
               f"IPv6 endpoints fail on most client networks; set the server's endpoint to {my_ip or 'its IPv4'} "

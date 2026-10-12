@@ -79,7 +79,8 @@ Metrics are kept `METRICS_DAYS` (7). Old rows are deleted hourly.
    ```bash
    curl -fsSL https://vpn.example.com/agent/install.sh | sudo bash -s -- --token <TOKEN> --name "Frankfurt 1" --location "Frankfurt" --country DE
    ```
-   Optional: `--endpoint 203.0.113.10` (public IPv4 or a hostname resolving to it; otherwise auto-detected over IPv4), `--port 51820`.
+   Optional: `--endpoint 203.0.113.10` (public IPv4 or a hostname resolving to it; otherwise the agent detects the server's own public IPv4), `--port 51820`.
+   The panel can sit behind Cloudflare; VPN servers can't (WireGuard is UDP). Don't proxy a hostname you pass as `--endpoint`.
 3. The wizard notices the new server check in and takes you to it; it's immediately available in every customer's portal. Open **UDP 51820** in your cloud provider's firewall/security group.
 
 Agents update themselves when the panel is redeployed with a newer agent.
