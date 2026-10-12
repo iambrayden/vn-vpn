@@ -23,7 +23,7 @@
   // ---------------------------------------------------------------- dialogs
   document.addEventListener('click', e => {
     const opener = e.target.closest('[data-open]');
-    if (opener) { e.preventDefault(); $('#' + opener.dataset.open)?.showModal(); }
+    if (opener) { e.preventDefault(); opener.closest('details.menu')?.removeAttribute('open'); $('#' + opener.dataset.open)?.showModal(); }
     const closer = e.target.closest('[data-close]');
     if (closer) closer.closest('dialog')?.close();
     if (e.target.tagName === 'DIALOG') e.target.close(); // click on backdrop

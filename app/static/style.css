@@ -208,9 +208,9 @@ details.setup[open] > summary .chev { transform: rotate(180deg); }
 .list .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .table-card { padding: 0; overflow: hidden; }
-.table-wrap { overflow-x: auto; }
+.table-wrap { overflow-x: auto; overflow-y: hidden; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
-th, td { text-align: left; padding: 12px 16px; border-bottom: 1px solid var(--line); vertical-align: middle; white-space: nowrap; }
+th, td { text-align: left; padding: 12px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; white-space: nowrap; }
 tbody tr:last-child td { border-bottom: 0; }
 tbody tr:hover { background: var(--card-2); }
 th { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 650; background: var(--card-2); }
@@ -297,8 +297,12 @@ td a { color: inherit; text-decoration-color: var(--line); }
 td a:hover { color: var(--accent); }
 
 /* ---------- server stats in tables */
-.mini { display: flex; align-items: center; gap: 8px; min-width: 110px; font-size: 13px; }
-.mini .meter { flex: 0 0 56px; }
+.mini { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.mini .meter { flex: 0 0 44px; }
+.servers-table td:first-child { white-space: normal; min-width: 180px; }
+.servers-table th:first-child, .servers-table td:first-child { padding-left: 18px; }
+.servers-table .actions { width: 1%; padding-right: 14px; }
+@media (max-width: 960px) { .hide-md { display: none; } }
 .mini span:last-child { font-variant-numeric: tabular-nums; }
 
 /* ---------- charts (palette validated in light & dark: series-1 blue, series-2 orange) */

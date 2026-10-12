@@ -22,7 +22,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 CONF_DIR = os.environ.get("VNVPN_DIR", "/etc/vnvpn")
 CONF_FILE = os.path.join(CONF_DIR, "agent.json")
 KEY_FILE = os.path.join(CONF_DIR, "private.key")
@@ -143,8 +143,10 @@ class Metrics:
 
     @staticmethod
     def _cpu():
+        # user nice system idle iowait irq softirq steal [guest guest_nice] - guest time is already
+        # included in user/nice, so only the first 8 fields add up to the total
         with open("/proc/stat") as f:
-            vals = [int(v) for v in f.readline().split()[1:]]
+            vals = [int(v) for v in f.readline().split()[1:9]]
         idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
         return sum(vals), idle
 
@@ -503,6 +505,20 @@ def doctor(_args):
     show = out("wg", "show", iface)
     port = next((l.split(":")[1].strip() for l in show.splitlines() if "listening port" in l), "")
     check(port == str(conf["listen_port"]), f"WireGuard listening on UDP {port or '?'}")
+    # CPU: who is using it, and how much the VPS host is stealing
+    def cpu_sample():
+        with open("/proc/stat") as f:
+            v = [int(x) for x in f.readline().split()[1:9]]
+        return sum(v), v[3] + v[4], v[7] if len(v) > 7 else 0
+    a = cpu_sample(); time.sleep(1); b = cpu_sample()
+    total = (b[0] - a[0]) or 1
+    busy, steal = 100 * (total - (b[1] - a[1])) / total, 100 * (b[2] - a[2]) / total
+    check(busy < 90, f"CPU {busy:.0f}% busy (steal {steal:.0f}%)",
+          "the VPS host is starving this server (high steal) - ask the provider or move plans" if steal > 20
+          else "see the top processes below")
+    if busy >= 50 or steal > 20:
+        top = out("ps", "-eo", "pcpu,pid,user,comm", "--sort=-pcpu").splitlines()[:6]
+        print("    top processes:\n" + "\n".join("      " + l for l in top))
     check(out("sysctl", "-n", "net.ipv4.ip_forward").strip() == "1", "IPv4 forwarding enabled",
           "sysctl -w net.ipv4.ip_forward=1")
 

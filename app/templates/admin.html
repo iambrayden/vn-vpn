@@ -90,8 +90,8 @@
 <!-- ============================================================ servers -->
 <div data-panel="servers" hidden>
   {% if nodes %}
-  <div class="card table-card"><div class="table-wrap"><table>
-    <thead><tr><th>Server</th><th>Status</th><th>Connected</th><th class="hide-sm">CPU</th><th class="hide-sm">Memory</th><th class="hide-sm">Bandwidth</th><th class="hide-sm">Last check-in</th><th></th></tr></thead>
+  <div class="card table-card"><div class="table-wrap"><table class="servers-table">
+    <thead><tr><th>Server</th><th>Status</th><th title="Devices connected right now">Users</th><th class="hide-sm">CPU</th><th class="hide-sm">Memory</th><th class="hide-md">Bandwidth</th><th class="hide-md">Check-in</th><th><span class="sr-only">Actions</span></th></tr></thead>
     <tbody>
     {% for n in nodes %}
     <tr data-node-row="{{ n.id }}">
@@ -105,12 +105,13 @@
       {% set mm = n.m %}
       <td class="hide-sm"><div class="mini" data-node-cpu="{{ n.id }}">{% if mm %}<span class="meter{{ ' high' if mm.cpu >= 90 else ' mid' if mm.cpu >= 70 }}"><i style="width:{{ [mm.cpu, 2]|max }}%"></i></span><span>{{ '%.0f'|format(mm.cpu) }}%</span>{% else %}<span class="muted">—</span>{% endif %}</div></td>
       <td class="hide-sm"><div class="mini" data-node-mem="{{ n.id }}">{% if mm %}<span class="meter{{ ' high' if mm.mem_pct >= 90 else ' mid' if mm.mem_pct >= 70 }}"><i style="width:{{ [mm.mem_pct, 2]|max }}%"></i></span><span>{{ '%.0f'|format(mm.mem_pct) }}%</span>{% else %}<span class="muted">—</span>{% endif %}</div></td>
-      <td class="hide-sm" data-node-bw="{{ n.id }}">{{ (mm.rx_bps + mm.tx_bps)|bps if mm else '—' }}</td>
-      <td class="hide-sm muted small"><span data-node-seen="{{ n.id }}">{{ n.last_seen|ago }}</span>{% if n.agent_version %} · v{{ n.agent_version }}{% endif %}</td>
+      <td class="hide-md" data-node-bw="{{ n.id }}">{{ (mm.rx_bps + mm.tx_bps)|bps if mm else '—' }}</td>
+      <td class="hide-md muted small"><span data-node-seen="{{ n.id }}">{{ n.last_seen|ago }}</span>{% if n.agent_version %}<br>v{{ n.agent_version }}{% endif %}</td>
       <td class="actions">
-        <button class="btn sm" data-open="edit-node-{{ n.id }}">Edit</button>
-        <details class="menu row-menu"><summary class="btn sm ghost" aria-label="More actions">•••</summary>
+        <details class="menu row-menu"><summary class="btn sm ghost" aria-label="Actions for {{ n.name }}">•••</summary>
           <div class="menu-pop">
+            <button type="button" data-open="edit-node-{{ n.id }}">Edit…</button>
+            <a href="/admin/servers/{{ n.id }}">Stats &amp; sessions</a>
             <form method="post" action="/admin/nodes/{{ n.id }}/reenroll"><button>Re-enroll…</button></form>
             <form method="post" action="/admin/nodes/{{ n.id }}/toggle"><button>{{ 'Hide from customers' if n.enabled else 'Show to customers' }}</button></form>
             <form method="post" action="/admin/nodes/{{ n.id }}/delete" data-confirm="Remove {{ n.name }}? Its agent will stop syncing and customers lose this location." data-confirm-label="Remove server">
