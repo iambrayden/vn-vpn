@@ -65,6 +65,18 @@ CREATE TABLE IF NOT EXISTS device_stats (
     PRIMARY KEY (device_id, node_id)
 );
 
+-- Data used per customer, per server, per UTC day. Built from the growth of WireGuard's per-peer counters
+-- (which reset when a tunnel restarts), so totals survive restarts. Kept indefinitely; it's tiny.
+CREATE TABLE IF NOT EXISTS usage_daily (
+    day       TEXT NOT NULL,                 -- YYYY-MM-DD (UTC)
+    user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    node_id   INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    down      INTEGER NOT NULL DEFAULT 0,    -- bytes to the customer
+    up        INTEGER NOT NULL DEFAULT 0,    -- bytes from the customer
+    PRIMARY KEY (day, user_id, node_id)
+);
+CREATE INDEX IF NOT EXISTS usage_daily_user ON usage_daily (user_id, day);
+
 -- One row per agent check-in (~15s); pruned after METRICS_DAYS.
 CREATE TABLE IF NOT EXISTS node_metrics (
     node_id      INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,

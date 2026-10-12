@@ -411,6 +411,27 @@ def plan_context(user):
     }
 
 
+USAGE_PERIODS = {"month": "This month", "30d": "Last 30 days", "all": "All time"}
+
+
+def user_usage(conn, user_id: int, period: str) -> dict:
+    """Data used per location for a customer over a period (UTC days)."""
+    today = now_utc().date()
+    since = {"month": today.replace(day=1).isoformat(), "30d": (today - timedelta(days=29)).isoformat(),
+             "all": "0000-00-00"}[period]
+    rows = [dict(r) for r in conn.execute("""
+        SELECT n.id, n.name, n.location, n.country, SUM(u.down) down, SUM(u.up) up
+        FROM usage_daily u JOIN nodes n ON n.id = u.node_id
+        WHERE u.user_id = ? AND u.day >= ? GROUP BY n.id ORDER BY SUM(u.down + u.up) DESC""", (user_id, since))]
+    peak = max((r["down"] + r["up"] for r in rows), default=0)
+    for r in rows:
+        r["total"] = r["down"] + r["up"]
+        r["pct"] = round(100 * r["total"] / peak) if peak else 0
+        r["country_name"] = countries.COUNTRIES.get(r["country"], "")
+    return {"rows": rows, "down": sum(r["down"] for r in rows), "up": sum(r["up"] for r in rows),
+            "period": period, "label": USAGE_PERIODS[period]}
+
+
 @app.get("/portal", response_class=HTMLResponse)
 def portal(request: Request):
     user = require_user(request)
@@ -421,8 +442,11 @@ def portal(request: Request):
             add_device(conn, user, "My device")  # first visit after subscribing: one ready-to-use device
         devices = user_devices(conn, user)
         nodes = portal_nodes(conn, devices)
+        period = request.query_params.get("usage", "month")
+        usage = user_usage(conn, user["id"], period if period in USAGE_PERIODS else "month")
     connected = [d for d in devices if d["connected"]]
-    return render(request, "portal.html", nodes=nodes, devices=devices, connected=connected,
+    return render(request, "portal.html", nodes=nodes, devices=devices, connected=connected, usage=usage,
+                  usage_periods=USAGE_PERIODS,
                   ever_connected=any(d["last_handshake"] for d in devices), max_devices=billing.MAX_DEVICES,
                   **plan_context(user))
 
@@ -1154,8 +1178,11 @@ async def agent_sync(request: Request, authorization: str | None = Header(None))
     now = int(time.time())
     with db.session() as conn:
         devices = {d["public_key"]: d for d in conn.execute(
-            """SELECT d.id, d.name, d.public_key, d.address, d.last_handshake, d.active_since, u.email
+            """SELECT d.id, d.user_id, d.name, d.public_key, d.address, d.last_handshake, d.active_since, u.email
                FROM devices d JOIN users u ON u.id = d.user_id""")}
+        prev = {r["device_id"]: r for r in conn.execute(
+            "SELECT device_id, rx_bytes, tx_bytes FROM device_stats WHERE node_id = ?", (node["id"],))}
+        today = now_utc().strftime("%Y-%m-%d")
         for p in peers_in:
             d = devices.get(p.get("public_key"))
             if not d:
@@ -1164,6 +1191,16 @@ async def agent_sync(request: Request, authorization: str | None = Header(None))
                 hs, rx, tx = int(p.get("handshake") or 0), int(p.get("rx") or 0), int(p.get("tx") or 0)
             except (TypeError, ValueError):
                 continue
+            # usage = growth of the counters since the last check-in; a smaller value means the counter
+            # was reset (tunnel restart / peer re-added), so everything it shows now is new traffic
+            last = prev.get(d["id"])
+            up = rx - last["rx_bytes"] if last and rx >= last["rx_bytes"] else rx
+            down = tx - last["tx_bytes"] if last and tx >= last["tx_bytes"] else tx
+            if up or down:
+                conn.execute("""INSERT INTO usage_daily (day, user_id, node_id, down, up) VALUES (?,?,?,?,?)
+                                ON CONFLICT(day, user_id, node_id) DO UPDATE SET
+                                    down = down + excluded.down, up = up + excluded.up""",
+                             (today, d["user_id"], node["id"], down, up))
             conn.execute("""
                 INSERT INTO device_stats (device_id, node_id, rx_bytes, tx_bytes, last_handshake)
                 VALUES (?,?,?,?,?)

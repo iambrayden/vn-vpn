@@ -367,3 +367,12 @@ figure.chart-card h3 { margin: 0; }
 .final-cta { text-align: center; padding: 44px 20px; }
 .final-cta h2 { font-size: 28px; }
 .footer { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 56px; font-size: 13px; }
+
+/* ---------- usage by location (single-series magnitude bars, series-1) */
+.usage-table th { background: none; }
+.usage-table th, .usage-table td { padding-left: 0; }
+.usage-table td:nth-child(n+3), .usage-table th:nth-child(n+3) { text-align: right; font-variant-numeric: tabular-nums; }
+.usage-table .bar-cell { width: 40%; }
+.bar { display: block; height: 8px; border-radius: 4px; background: var(--grid); overflow: hidden; }
+.bar > i { display: block; height: 100%; border-radius: 4px; background: var(--series-1); }
+a.chip { text-decoration: none; display: inline-block; }

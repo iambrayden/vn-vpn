@@ -177,6 +177,38 @@
   {% endif %}
 </section>
 
+<!-- usage per location -->
+<section id="usage">
+  <div class="section-head">
+    <div><h2>Usage by location</h2>
+      <span class="muted small">{{ usage.label }} · {{ (usage.down + usage.up)|bytes }} total · ↓ {{ usage.down|bytes }} downloaded · ↑ {{ usage.up|bytes }} uploaded</span></div>
+    <div class="chips" role="group" aria-label="Period">
+      {% for key, label in usage_periods.items() %}
+      <a class="chip{{ ' active' if usage.period == key }}" href="?usage={{ key }}{{ '&device=' ~ request.query_params.get('device') if request.query_params.get('device') }}#usage">{{ label }}</a>
+      {% endfor %}
+    </div>
+  </div>
+  <div class="card" style="padding:6px 20px">
+    {% if usage.rows %}
+    <table class="usage-table">
+      <thead><tr><th>Location</th><th class="hide-sm" aria-label="Share of your usage"></th><th>↓ Down</th><th>↑ Up</th><th>Total</th></tr></thead>
+      <tbody>
+      {% for r in usage.rows %}
+      <tr>
+        <td><div class="cell-main"><span class="flag sm">{{ r.country|flag }}</span>
+          <div><b>{{ r.location or r.name }}</b>{% if r.location and r.name != r.location %} <span class="muted small">{{ r.name }}</span>{% endif %}</div></div></td>
+        <td class="hide-sm bar-cell"><span class="bar" title="{{ r.total|bytes }} — {{ r.pct }}% of your busiest location"><i style="width: {{ [r.pct, 2]|max }}%"></i></span></td>
+        <td>{{ r.down|bytes }}</td><td>{{ r.up|bytes }}</td><td><b>{{ r.total|bytes }}</b></td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted" style="margin:14px 0">No data used {{ 'yet' if usage.period == 'all' else 'in this period' }}. Usage appears here once you connect.</p>
+    {% endif %}
+  </div>
+</section>
+
 <!-- account -->
 <section id="account">
   <div class="section-head"><h2>Account</h2></div>

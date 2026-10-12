@@ -174,3 +174,44 @@ def test_garbage_peers_do_not_break_checkin(client):
     post_sync(client, secret, peers=[{"public_key": "x", "handshake": "soon"}, "nope", None])
     with db.session() as conn:
         assert main.node_online(conn.execute("SELECT * FROM nodes WHERE id = 1").fetchone())
+
+
+def test_usage_per_location_survives_counter_resets(client):
+    chi, cgk = add_node(client, "CHI1", "US"), add_node(client, "CGK1", "ID")
+    dev = customer_with_device(client)
+    now = int(time.time())
+    peer = lambda rx, tx: {"public_key": dev["public_key"], "handshake": now - 5, "rx": rx, "tx": tx}
+    sync(client, chi, [peer(1_000, 10_000)])        # server rx = customer upload, tx = download
+    sync(client, chi, [peer(3_000, 50_000)])        # +2 KB up, +40 KB down
+    sync(client, chi, [peer(500, 5_000)])           # tunnel restarted: counters reset -> +0.5 KB, +5 KB
+    sync(client, cgk, [peer(2_000, 100_000)])
+    with db.session() as conn:
+        uid = conn.execute("SELECT id FROM users WHERE email = 'cust@example.com'").fetchone()[0]
+        u = main.user_usage(conn, uid, "month")
+    by = {r["name"]: (r["down"], r["up"]) for r in u["rows"]}
+    assert by == {"CHI1": (55_000, 3_500), "CGK1": (100_000, 2_000)}
+    assert [r["name"] for r in u["rows"]] == ["CGK1", "CHI1"]  # busiest first
+    page = client.get("/portal").text
+    assert "Usage by location" in page and "CHI1" in page and "97.7 KB" in page  # CGK1 down
+
+
+def test_usage_periods(client):
+    secret = add_node(client, "CHI1")
+    dev = customer_with_device(client)
+    with db.session() as conn:
+        uid = conn.execute("SELECT id FROM users WHERE email = 'cust@example.com'").fetchone()[0]
+        conn.execute("INSERT INTO usage_daily VALUES ('2020-01-01', ?, 1, 1000, 10)", (uid,))
+        assert main.user_usage(conn, uid, "month")["rows"] == []
+        assert main.user_usage(conn, uid, "all")["down"] == 1000
+    assert "No data used in this period" in client.get("/portal?usage=30d").text
+    assert "1000 B" in client.get("/portal?usage=all").text
+
+
+def test_usage_is_private_to_each_customer(client):
+    secret = add_node(client, "CHI1")
+    dev = customer_with_device(client)
+    sync(client, secret, [{"public_key": dev["public_key"], "handshake": int(time.time()), "rx": 9, "tx": 77_777}])
+    client.post("/logout")
+    signup(client, "other@example.com")
+    grant("other@example.com", "basic")
+    assert "No data used" in client.get("/portal").text
