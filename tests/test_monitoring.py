@@ -119,6 +119,7 @@ def test_homepage_is_public(client):
     add_node(client, "Chicago", "US")
     page = client.get("/").text
     assert "Server locations" in page and "Simple pricing" in page and "/signup?plan=pro" in page
+    assert "Online" not in page and "Offline" not in page and "Maintenance" not in page and "servers online" not in page
     assert "/static/flags/us.svg" in page
 
 

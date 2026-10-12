@@ -22,7 +22,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 CONF_DIR = os.environ.get("VNVPN_DIR", "/etc/vnvpn")
 CONF_FILE = os.path.join(CONF_DIR, "agent.json")
 KEY_FILE = os.path.join(CONF_DIR, "private.key")
@@ -453,6 +453,16 @@ def run(args):
             failures += 1
             last_error = f"panel returned HTTP {e.code}: {e.read()[:200].decode(errors='replace')}"
             log(last_error)
+            if e.code == 401:
+                # re-running the installer re-enrolls and writes a new secret; pick it up without a restart
+                try:
+                    fresh = load_conf()
+                    if fresh.get("secret") != conf.get("secret"):
+                        conf = fresh
+                        failures = 0
+                        log("loaded new credentials from agent.json")
+                except (OSError, ValueError):
+                    pass
         except Exception as e:  # network blips etc. - keep the current tunnel config running
             failures += 1
             last_error = f"sync failed: {e}"

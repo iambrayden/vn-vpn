@@ -254,14 +254,18 @@ async def http_error(request: Request, exc: StarletteHTTPException):
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    """Public homepage: what the service is, live locations, pricing."""
+    """Public homepage: what the service is, locations (no server status), pricing."""
     with db.session() as conn:
-        nodes = visible_nodes(conn)
-    for n in nodes:
-        n["country_name"] = countries.COUNTRIES.get(n["country"], "")
-    nodes.sort(key=lambda n: (not n["online"], n["country_name"] or n["location"], n["name"]))
-    country_count = len({n["country"] or n["location"] for n in nodes})
-    return render(request, "landing.html", nodes=nodes, country_count=country_count, **plan_context_public())
+        rows = conn.execute("SELECT name, location, country FROM nodes WHERE enabled = 1").fetchall()
+    locations = {}
+    for r in rows:  # one entry per city, however many servers it has
+        city = r["location"] or r["name"]
+        locations[(r["country"], city.lower())] = {"city": city, "country": r["country"],
+                                                   "country_name": countries.COUNTRIES.get(r["country"], "")}
+    locations = sorted(locations.values(), key=lambda l: (l["country_name"] or l["city"], l["city"]))
+    country_count = len({l["country"] or l["city"] for l in locations})
+    return render(request, "landing.html", locations=locations, country_count=country_count,
+                  **plan_context_public())
 
 
 def plan_context_public():
@@ -696,7 +700,10 @@ def admin(request: Request):
     return render(request, "admin.html", nodes=nodes, users=users, tokens=tokens, sessions=sessions,
                   panel=panel_url(request), now_ts=now_utc().timestamp(),
                   provision_enabled=bool(PROVISION_API_KEY), billing_enabled=billing.enabled(),
-                  webhook_configured=bool(billing.STRIPE_WEBHOOK_SECRET))
+                  webhook_configured=bool(billing.STRIPE_WEBHOOK_SECRET),
+                  price_problems={k: billing.price_errors.get(k) for k in billing.PLANS
+                                  if billing.enabled() and not billing.price_label(k)}
+                                 if billing.enabled() else {})
 
 
 @app.get("/admin/servers/{node_id}", response_class=HTMLResponse)

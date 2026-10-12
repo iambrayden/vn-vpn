@@ -347,3 +347,22 @@ def test_old_single_key_users_keep_their_config(tmp_path, monkeypatch):
     with db.session() as conn:
         devs = conn.execute("SELECT user_id, public_key, address FROM devices").fetchall()
     assert [tuple(d) for d in devs] == [(1, "PUB1", "10.66.0.2")]
+
+
+def test_admin_told_why_a_price_is_missing(client, stripe_on, monkeypatch):
+    def bad(pid):
+        raise billing.stripe.InvalidRequestError(f"No such price: '{pid}'", "id")
+    monkeypatch.setattr(stripe_on.v1.prices, "retrieve", bad)
+    monkeypatch.setitem(billing.PLANS["basic"], "price_id", "prod_ABC")
+    with db.session() as conn:
+        main.create_user(conn, "boss@example.com", "adminpass123", is_admin=True)
+    client.post("/login", data={"email": "boss@example.com", "password": "adminpass123"})
+    page = client.get("/admin").text
+    assert "No price shown for Basic" in page and "use the price ID" in page
+
+
+def test_price_text_from_env_shows_on_homepage(client, monkeypatch):
+    monkeypatch.setitem(billing.PLANS["basic"], "price_label", "$4.99/month")
+    monkeypatch.setitem(billing.PLANS["pro"], "price_label", "$9.99/month")
+    page = client.get("/").text
+    assert "$4.99/month" in page and "$9.99/month" in page

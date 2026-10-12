@@ -21,6 +21,12 @@
     You can still grant plans manually from the Users tab.</div>
 </div>
 {% endif %}
+{% for key, err in price_problems.items() %}
+<div class="card notice warn" style="margin-bottom:18px"><div>
+  <b>No price shown for {{ plans[key].name }}.</b>
+  {% if err %}Stripe said: <code>{{ err }}</code>{% else %}Set <code>STRIPE_PRICE_{{ key|upper }}</code> to the plan's Stripe price ID (<code>price_…</code>), or <code>PLAN_{{ key|upper }}_PRICE</code> to the text to show, e.g. <code>$4.99/month</code>.{% endif %}
+</div></div>
+{% endfor %}
 {% set paying = users|selectattr('access')|rejectattr('is_admin')|list %}
 
 <div class="tabs" data-tabs role="tablist">

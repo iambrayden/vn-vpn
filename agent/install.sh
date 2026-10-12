@@ -100,7 +100,9 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
-systemctl enable --now vnvpn-agent >/dev/null
+systemctl enable vnvpn-agent >/dev/null 2>&1
+# restart, not just start: on a re-install the running agent still holds the old key
+systemctl restart vnvpn-agent
 
 sleep 3
 if systemctl is-active -q vnvpn-agent; then

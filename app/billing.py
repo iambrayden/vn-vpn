@@ -29,6 +29,7 @@ LIVE_STATUSES = {"active", "trialing", "past_due"}
 
 _client = stripe.StripeClient(STRIPE_SECRET_KEY) if STRIPE_SECRET_KEY else None
 _price_cache: dict[str, tuple[float, str]] = {}
+price_errors: dict[str, str] = {}  # plan -> why its price couldn't be read from Stripe (shown to admins)
 
 
 def enabled() -> bool:
@@ -76,8 +77,13 @@ def price_label(plan: str) -> str:
             count = rec.get("interval_count", 1)
             text += f"/{rec['interval']}" if count == 1 else f" every {count} {rec['interval']}s"
         _price_cache[plan] = (time.time(), text)
+        price_errors.pop(plan, None)
         return text
-    except stripe.StripeError:
+    except stripe.StripeError as e:
+        hint = " (that's a product ID; use the price ID, which starts with price_)" \
+            if p["price_id"].startswith("prod_") else ""
+        price_errors[plan] = f"{p['price_id']}: {e.user_message or e}{hint}"
+        _price_cache[plan] = (time.time() - 3300, "")  # retry in ~5 minutes rather than on every page view
         return ""
 
 

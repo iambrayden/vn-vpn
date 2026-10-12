@@ -22,6 +22,11 @@ services:
       - STRIPE_PRICE_PRO=${STRIPE_PRICE_PRO:-}
       - PLAN_BASIC_DEVICES=${PLAN_BASIC_DEVICES:-1}
       - PLAN_PRO_DEVICES=${PLAN_PRO_DEVICES:-5}
+      # Price text shown on the site, e.g. "$4.99/month". Optional when Stripe is set up (read from Stripe).
+      - PLAN_BASIC_PRICE=${PLAN_BASIC_PRICE:-}
+      - PLAN_PRO_PRICE=${PLAN_PRO_PRICE:-}
+      - PLAN_BASIC_NAME=${PLAN_BASIC_NAME:-Basic}
+      - PLAN_PRO_NAME=${PLAN_PRO_NAME:-Pro}
       # Monitoring & logging
       - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-}
       - LOG_SESSIONS=${LOG_SESSIONS:-true}

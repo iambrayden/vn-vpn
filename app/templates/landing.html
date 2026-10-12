@@ -7,7 +7,7 @@
   <!-- hero -->
   <section class="hero-land">
     <div class="wrap">
-      <span class="eyebrow"><span class="dot live" style="color:var(--ok)"></span>{{ nodes|selectattr('online')|list|length }} servers online now</span>
+      <span class="eyebrow">Powered by WireGuard®</span>
       <h1>Private internet,<br>without the slowdown.</h1>
       <p class="lead">{{ brand }} encrypts everything you do online with WireGuard® — the fastest, most modern VPN protocol.
         Pick a country, tap connect, done.</p>
@@ -54,15 +54,14 @@
   <section class="wrap" id="locations">
     <div class="center-head">
       <h2>Server locations</h2>
-      <p class="muted">Live status — every plan includes every location.</p>
+      <p class="muted">Every plan includes every location.</p>
     </div>
-    {% if nodes %}
+    {% if locations %}
     <div class="loc-grid">
-      {% for n in nodes %}
-      <div class="loc{{ ' off' if not n.online }}">
-        <span class="flag sm">{{ n.country|flag }}</span>
-        <div><b>{{ n.location or n.name }}</b><div class="muted small">{{ n.country_name or n.name }}</div></div>
-        <span class="pill {{ 'on' if n.online else 'off' }}" style="margin-left:auto">{{ 'Online' if n.online else 'Maintenance' }}</span>
+      {% for l in locations %}
+      <div class="loc">
+        <span class="flag sm">{{ l.country|flag }}</span>
+        <div><b>{{ l.city }}</b>{% if l.country_name and l.country_name != l.city %}<div class="muted small">{{ l.country_name }}</div>{% endif %}</div>
       </div>
       {% endfor %}
     </div>
