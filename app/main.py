@@ -3,6 +3,7 @@ import asyncio
 import csv
 import hashlib
 import io
+import logging
 import ipaddress
 import os
 import re
@@ -22,6 +23,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import billing, countries, crypto, db, monitoring
+
+log = logging.getLogger("vnvpn")
 
 BASE = Path(__file__).parent
 AGENT_DIR = BASE.parent / "agent"
@@ -1046,44 +1049,67 @@ async def agent_register(request: Request):
 
 @app.post("/api/agent/sync")
 async def agent_sync(request: Request, authorization: str | None = Header(None)):
-    """Agent heartbeat: reports per-peer traffic, receives the desired peer list."""
+    """Agent heartbeat: reports per-peer traffic, receives the desired peer list.
+
+    Kept in separate transactions so optional extras (stats, logs) can never stop a server from
+    checking in: 1) mark the node seen, 2) device state, 3) monitoring/logging (best effort)."""
     secret = (authorization or "").removeprefix("Bearer ").strip()
-    body = await request.json()
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(400, "Invalid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Invalid body")
     with db.session() as conn:
         node = conn.execute("SELECT * FROM nodes WHERE secret_hash = ?", (crypto.sha256(secret),)).fetchone()
         if not node:
             raise HTTPException(401, "Unknown node; re-enroll this server")
-        conn.execute("UPDATE nodes SET last_seen = ?, agent_version = ? WHERE id = ?",
-                     (now_utc().strftime("%Y-%m-%dT%H:%M:%S"), str(body.get("agent_version", ""))[:20], node["id"]))
-        now = int(time.time())
+        conn.execute("UPDATE nodes SET last_seen = ?, agent_version = ?, agent_error = ? WHERE id = ?",
+                     (now_utc().strftime("%Y-%m-%dT%H:%M:%S"), str(body.get("agent_version", ""))[:20],
+                      str(body.get("last_error") or "")[:500], node["id"]))
+
+    peers_in = [p for p in body.get("peers") or [] if isinstance(p, dict)]
+    now = int(time.time())
+    with db.session() as conn:
         devices = {d["public_key"]: d for d in conn.execute(
             """SELECT d.id, d.name, d.public_key, d.address, d.last_handshake, d.active_since, u.email
                FROM devices d JOIN users u ON u.id = d.user_id""")}
-        for p in body.get("peers", []):
+        for p in peers_in:
             d = devices.get(p.get("public_key"))
             if not d:
                 continue
-            hs = int(p.get("handshake", 0))
+            try:
+                hs, rx, tx = int(p.get("handshake") or 0), int(p.get("rx") or 0), int(p.get("tx") or 0)
+            except (TypeError, ValueError):
+                continue
             conn.execute("""
                 INSERT INTO device_stats (device_id, node_id, rx_bytes, tx_bytes, last_handshake)
                 VALUES (?,?,?,?,?)
                 ON CONFLICT(device_id, node_id) DO UPDATE SET
                     rx_bytes = excluded.rx_bytes, tx_bytes = excluded.tx_bytes,
                     last_handshake = excluded.last_handshake""",
-                (d["id"], node["id"], int(p.get("rx", 0)), int(p.get("tx", 0)), hs))
-            if now - hs < ACTIVE_WINDOW:
-                monitoring.record_session(conn, node, d, d["email"], p.get("endpoint", ""),
-                                          int(p.get("rx", 0)), int(p.get("tx", 0)))
+                (d["id"], node["id"], rx, tx, hs))
             if hs > d["last_handshake"]:
                 # a handshake after an idle gap starts a new session
                 new_session = now - d["last_handshake"] >= ACTIVE_WINDOW or not d["active_since"]
                 conn.execute("UPDATE devices SET last_handshake = ?, active_since = ? WHERE id = ?",
                              (hs, hs if new_session else d["active_since"], d["id"]))
-        if isinstance(body.get("metrics"), dict):
-            monitoring.record_metrics(conn, node["id"], body["metrics"])
-        if body.get("flows"):
-            monitoring.record_flows(conn, node, body["flows"],
-                                    {d["address"]: d for d in devices.values()})
+
+    try:
+        with db.session() as conn:
+            for p in peers_in:
+                d = devices.get(p.get("public_key"))
+                if d and now - int(p.get("handshake") or 0) < ACTIVE_WINDOW:
+                    monitoring.record_session(conn, node, d, d["email"], str(p.get("endpoint") or ""),
+                                              int(p.get("rx") or 0), int(p.get("tx") or 0))
+            if isinstance(body.get("metrics"), dict):
+                monitoring.record_metrics(conn, node["id"], body["metrics"])
+            if isinstance(body.get("flows"), list):
+                monitoring.record_flows(conn, node, body["flows"], {d["address"]: d for d in devices.values()})
+    except Exception:
+        log.exception("node %s: recording stats/logs failed (check-in still accepted)", node["id"])
+
+    with db.session() as conn:
         allowed = allowed_device_ids(conn) if node["enabled"] else set()
     peers = [{"public_key": d["public_key"], "allowed_ips": f"{d['address']}/32"}
              for d in devices.values() if d["id"] in allowed]

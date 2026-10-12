@@ -91,6 +91,7 @@
     <tr data-node-row="{{ n.id }}">
       <td><div class="cell-main"><span class="flag">{{ n.country|flag }}</span>
         <div><a href="/admin/servers/{{ n.id }}"><b>{{ n.name }}</b></a>{% if not n.enabled %} <span class="pill warn">Hidden</span>{% endif %}
+          {% if n.agent_error %} <a href="/admin/servers/{{ n.id }}" class="pill warn" title="{{ n.agent_error }}">⚠ Agent error</a>{% endif %}
           {% if n.private_ip %} <span class="pill off" title="Clients can't reach a private address. Edit the server and set its public IPv4.">Private IP</span>{% endif %}
           <div class="muted small">{{ n.location or '—' }} · <span class="mono">{{ n.endpoint_host }}</span></div></div></div></td>
       <td>{{ node_status(n) }}</td>

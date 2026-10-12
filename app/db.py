@@ -173,6 +173,7 @@ MIGRATIONS = [
     ("users", "stripe_subscription_id", "TEXT NOT NULL DEFAULT ''"),
     ("users", "period_end", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "cancel_at_period_end", "INTEGER NOT NULL DEFAULT 0"),
+    ("nodes", "agent_error", "TEXT NOT NULL DEFAULT ''"),          # last problem the agent reported
 ]
 
 

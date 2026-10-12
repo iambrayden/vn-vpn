@@ -20,6 +20,19 @@
     <span class="pill {{ 'on' if n.online else 'off' }}" data-k="online"><span class="dot{{ ' live' if n.online }}"></span>{{ 'Online' if n.online else 'Offline' }} · <span data-k="seen">{{ n.last_seen|ago }}</span></span>
   </div>
 
+  {% if n.agent_error %}
+  <div class="card notice warn"><div>
+    <b>The agent on this server reported a problem:</b>
+    <pre class="mono small" style="white-space:pre-wrap;margin:8px 0 0">{{ n.agent_error }}</pre>
+    <span class="small">Run <code>sudo python3 /opt/vnvpn/agent.py doctor</code> on the server for a full check.</span>
+  </div></div>
+  {% endif %}
+  {% if not n.online %}
+  <div class="card notice warn"><div>
+    <b>No check-in for {{ n.last_seen|ago|replace(' ago', '') }}.</b> On the server, run
+    <code>systemctl status vnvpn-agent</code> and <code>journalctl -u vnvpn-agent -n 30 --no-pager</code> to see why the agent isn't reaching the panel.
+  </div></div>
+  {% endif %}
   {% if not m %}
   <div class="card notice warn"><div>
     <b>No server stats yet.</b>

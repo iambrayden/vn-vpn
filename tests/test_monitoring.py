@@ -150,3 +150,26 @@ def test_agent_metrics_sample_reads_proc():
     m = agent.Metrics("lo")
     s = m.sample(active_peers=2)
     assert 0 <= s["cpu"] <= 100 and s["mem_total"] > 0 and s["disk_total"] > 0 and s["active_peers"] == 2
+
+
+def test_checkin_survives_broken_logging(client, monkeypatch):
+    """Stats/log failures must never stop a server from checking in (it would show offline)."""
+    secret = add_node(client)
+    def boom(*a, **k):
+        raise RuntimeError("logging broke")
+    monkeypatch.setattr(monitoring, "record_metrics", boom)
+    resp = post_sync(client, secret, metrics=METRICS, last_error="wg-quick up wg0 failed: RTNETLINK")
+    assert resp["node_id"] == 1
+    with db.session() as conn:
+        n = conn.execute("SELECT * FROM nodes WHERE id = 1").fetchone()
+    assert main.node_online(n) and "RTNETLINK" in n["agent_error"]
+    login_admin(client)
+    assert "Agent error" in client.get("/admin").text
+    assert "RTNETLINK" in client.get("/admin/servers/1").text
+
+
+def test_garbage_peers_do_not_break_checkin(client):
+    secret = add_node(client)
+    post_sync(client, secret, peers=[{"public_key": "x", "handshake": "soon"}, "nope", None])
+    with db.session() as conn:
+        assert main.node_online(conn.execute("SELECT * FROM nodes WHERE id = 1").fetchone())

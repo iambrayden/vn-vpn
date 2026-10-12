@@ -22,7 +22,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 CONF_DIR = os.environ.get("VNVPN_DIR", "/etc/vnvpn")
 CONF_FILE = os.path.join(CONF_DIR, "agent.json")
 KEY_FILE = os.path.join(CONF_DIR, "private.key")
@@ -214,6 +214,7 @@ def parse_conntrack(line):
 class FlowCollector:
     """Aggregates connections from VPN clients by (client, destination, port, protocol)."""
     MAX_KEYS = 20000
+    install_attempted = False
 
     def __init__(self, subnet):
         self.subnet = subnet
@@ -222,14 +223,19 @@ class FlowCollector:
         self.proc = None
 
     def start(self):
-        if not shutil.which("conntrack"):
+        if not shutil.which("conntrack") and not FlowCollector.install_attempted:
+            FlowCollector.install_attempted = True
             # agents that self-updated predate the installer adding conntrack
             for pm, pkg in (("apt-get", "conntrack"), ("dnf", "conntrack-tools"), ("yum", "conntrack-tools"),
                             ("apk", "conntrack-tools")):
                 if shutil.which(pm):
                     cmd = [pm, "add", pkg] if pm == "apk" else [pm, "install", "-y", pkg]
                     log(f"installing {pkg} for destination logging")
-                    subprocess.run(cmd, capture_output=True, env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"})
+                    try:
+                        subprocess.run(cmd, capture_output=True, timeout=120,
+                                       env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"})
+                    except subprocess.TimeoutExpired:
+                        log(f"installing {pkg} timed out")
                     break
         if not shutil.which("conntrack"):
             log("destination logging is on but 'conntrack' couldn't be installed")
@@ -297,8 +303,10 @@ def render_wg_conf(conf, desired):
         f"-t mangle {{op}} FORWARD -o {iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu",
         f"-t mangle {{op}} FORWARD -i {iface} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu",
     ]
-    up = "; ".join("iptables " + r.format(op="-I") for r in rules)
-    down = "; ".join("iptables " + r.format(op="-D") for r in rules)
+    # "|| true": wg-quick aborts the whole bring-up if any hook command fails (e.g. a kernel without the
+    # TCPMSS module); a missing optional rule must never take the tunnel down. `doctor` reports gaps.
+    up = "; ".join(f"iptables {r.format(op='-I')} || true" for r in rules)
+    down = "; ".join(f"iptables {r.format(op='-D')} || true" for r in rules)
     lines = [
         "# Managed by vnvpn-agent - changes will be overwritten",
         "[Interface]",
@@ -308,7 +316,7 @@ def render_wg_conf(conf, desired):
     ]
     if desired.get("mtu"):
         lines.append(f"MTU = {desired['mtu']}")
-    lines += ["PostUp = sysctl -q -w net.ipv4.ip_forward=1; " + up, f"PostDown = {down}", ""]
+    lines += ["PostUp = sysctl -q -w net.ipv4.ip_forward=1 || true; " + up, f"PostDown = {down}", ""]
     for p in desired["peers"]:
         lines += ["[Peer]", f"PublicKey = {p['public_key']}", f"AllowedIPs = {p['allowed_ips']}", ""]
     return "\n".join(lines)
@@ -391,26 +399,39 @@ def run(args):
             log(f"restored {conf['interface']} from last config")
         except subprocess.CalledProcessError as e:
             log(f"could not restore interface: {e.stderr}")
-    metrics = Metrics(conf.get("wan_iface") or default_iface())
-    flows, unsent_flows = None, []
+    try:
+        metrics = Metrics(conf.get("wan_iface") or default_iface())
+    except Exception as e:  # stats are optional; never let them stop check-ins
+        log(f"server stats unavailable: {e}")
+        metrics = None
+    flows, unsent_flows, last_error, flow_failed = None, [], "", False
     while True:
         try:
             peers = peer_stats(conf["interface"])
             now = time.time()
-            body = {"agent_version": VERSION, "peers": peers,
-                    "metrics": metrics.sample(sum(1 for p in peers if now - p["handshake"] < 180))}
+            body = {"agent_version": VERSION, "peers": peers, "last_error": last_error}
+            if metrics:
+                try:
+                    body["metrics"] = metrics.sample(sum(1 for p in peers if now - p["handshake"] < 180))
+                except Exception as e:
+                    log(f"server stats failed: {e}")
             if flows:
                 unsent_flows = (unsent_flows + flows.drain())[-FlowCollector.MAX_KEYS:]
                 body["flows"] = unsent_flows
             desired = http("POST", f"{conf['panel']}/api/agent/sync", body, secret=conf["secret"])
             unsent_flows = []
-            last = apply(conf, desired, last)
             interval, failures = int(desired.get("interval", 15)), 0
+            try:
+                last = apply(conf, desired, last)
+                last_error = ""
+            except subprocess.CalledProcessError as e:
+                last_error = f"{' '.join(e.cmd)} failed: {(e.stderr or e.stdout or '').strip()[-400:]}"
+                log(last_error)
             # destination logging is switched on/off from the panel
-            if desired.get("flow_logging") and not flows and not DRY_RUN:
+            if desired.get("flow_logging") and not flows and not flow_failed and not DRY_RUN:
                 flows = FlowCollector(desired.get("subnet") or desired["address"])
                 if not flows.start():
-                    flows = None
+                    flows, flow_failed = None, True  # don't retry every check-in
             elif not desired.get("flow_logging") and flows:
                 flows.stop()
                 flows, unsent_flows = None, []
@@ -421,13 +442,15 @@ def run(args):
                 self_update(conf, latest)
         except urllib.error.HTTPError as e:
             failures += 1
-            log(f"panel returned HTTP {e.code}: {e.read()[:200]!r}")
+            last_error = f"panel returned HTTP {e.code}: {e.read()[:200].decode(errors='replace')}"
+            log(last_error)
         except Exception as e:  # network blips etc. - keep the current tunnel config running
             failures += 1
-            log(f"sync failed: {e}")
+            last_error = f"sync failed: {e}"
+            log(last_error)
         if args.once:
             return 0 if failures == 0 else 1
-        time.sleep(min(interval * (2 ** min(failures, 4)), 300) if failures else interval)
+        time.sleep(min(interval * (2 ** min(failures, 4)), 120) if failures else interval)
 
 
 def doctor(_args):
