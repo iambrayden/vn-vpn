@@ -3,17 +3,12 @@
 {% block page %}portal{% endblock %}
 
 {% macro load_label(load) %}{{ 'Busy' if load >= 80 else 'Moderate' if load >= 50 else 'Low load' }}{% endmacro %}
+{% set icon_dl %}<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16"/></svg>{% endset %}
+{% set selected = (devices|selectattr('id', 'equalto', request.query_params.get('device')|int)|first) or devices[0] %}
+{% set blocked = devices|selectattr('blocked')|list %}
 
 {% block content %}
 <div class="stack">
-
-{% if user.status != 'active' %}
-<div class="card empty">
-  <div class="big">⏸️</div>
-  <h1>Your account is paused</h1>
-  <p>Your VPN access is currently suspended. Please contact support or renew your subscription to reconnect.</p>
-</div>
-{% else %}
 
 <!-- live connection status -->
 <section class="card hero{{ ' connected' if connected }}">
@@ -21,15 +16,29 @@
     <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 3.3v5.6c0 4.8-3.3 8.4-8 9.7-4.7-1.3-8-4.9-8-9.7V5.3z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg>
   </div>
   <div class="hero-text">
-    <h1 data-k="hero-title">{{ 'Protected · ' ~ connected.name if connected else 'Not connected' }}</h1>
-    <p class="muted" data-k="hero-sub" style="margin:0">{{ 'Your traffic is encrypted and routed through the VPN.' if connected else 'Turn on a tunnel in the WireGuard app to get protected.' }}</p>
+    <h1 data-k="hero-title">{% if connected|length > 1 %}Protected · {{ connected|length }} devices{% elif connected %}Protected · {{ connected[0].node_name }}{% else %}Not connected{% endif %}</h1>
+    <p class="muted" data-k="hero-sub" style="margin:0">{% if connected %}{{ connected|map(attribute='name')|join(', ') }} {{ 'is' if connected|length == 1 else 'are' }} encrypted and routed through the VPN.{% else %}Turn on a tunnel in the WireGuard app to get protected.{% endif %}</p>
   </div>
   <div class="hero-meta">
-    <div><div class="k">Downloaded</div><div class="v" data-k="down">{{ connected.down|bytes if connected else '—' }}</div></div>
-    <div><div class="k">Uploaded</div><div class="v" data-k="up">{{ connected.up|bytes if connected else '—' }}</div></div>
-    <div class="hide-sm"><div class="k">Tunnel IP</div><div class="v mono">{{ vpn_ip }}</div></div>
+    <div><div class="k">Connections</div><div class="v"><span data-k="in-use">{{ connected|length }}</span> of {{ limit }}</div></div>
+    <div><div class="k">Downloaded</div><div class="v" data-k="down">{{ (connected|sum(attribute='down'))|bytes if connected else '—' }}</div></div>
+    <div><div class="k">Uploaded</div><div class="v" data-k="up">{{ (connected|sum(attribute='up'))|bytes if connected else '—' }}</div></div>
   </div>
 </section>
+
+<div class="card notice warn" id="limit-notice" {{ 'hidden' if not blocked }}>
+  <div>
+    <b>All your connections are in use.</b>
+    Your plan allows {{ limit }} device{{ 's' if limit != 1 }} at a time and
+    <span data-k="busy-names">{{ connected|map(attribute='name')|join(', ') }}</span> {{ 'is' if connected|length == 1 else 'are' }} connected,
+    so your other devices can't connect right now. Disconnect one below to switch{% if plan_key == 'basic' and billing_enabled %},
+    or upgrade to {{ plans.pro.name }} for {{ plans.pro.devices }} at a time{% endif %}.
+  </div>
+  {% if plan_key == 'basic' and billing_enabled and user.stripe_subscription_id %}
+  <form method="post" action="/billing/change" data-confirm="Switch to {{ plans.pro.name }} ({{ plans.pro.devices }} devices at a time)? You'll be charged the prorated difference now." data-confirm-label="Upgrade">
+    <input type="hidden" name="plan" value="pro"><button class="btn primary sm">Upgrade</button></form>
+  {% endif %}
+</div>
 
 <!-- setup guide: open until the user has connected once -->
 <details class="card setup" {{ 'open' if not ever_connected }}>
@@ -52,8 +61,9 @@
     </div>
     <div class="step">
       <h3>Add a location</h3>
-      <p data-desktop-only>Click <b>Download</b> on a server below and import the file in WireGuard — or tap <b>QR</b> and scan it with the app on your phone.</p>
-      <p data-mobile-only hidden>Tap <b>Download</b> on a server below and open the file with WireGuard. Add as many locations as you like.</p>
+      <p>Each device gets its own setup. Pick the device under <b>Locations</b>, then
+        <span data-desktop-only>click <b>Download</b> and import the file — or tap <b>QR</b> and scan it with your phone.</span>
+        <span data-mobile-only hidden>tap <b>Download</b> and open the file with WireGuard.</span></p>
     </div>
     <div class="step">
       <h3>Switch it on</h3>
@@ -62,22 +72,71 @@
   </div>
 </details>
 
+<!-- devices -->
+<section id="devices">
+  <div class="section-head">
+    <div><h2>Your devices</h2>
+      <span class="muted small">{{ limit }} connected at a time{% if plan %} on {{ plan.name }}{% endif %} · {{ devices|length }} of {{ max_devices }} devices added</span></div>
+    {% if devices|length < max_devices %}
+    <button class="btn" data-open="add-device">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12h14"/></svg>
+      Add device</button>
+    {% endif %}
+  </div>
+  <div class="card" style="padding:6px 20px">
+    <ul class="list devices">
+      {% for d in devices %}
+      <li data-device="{{ d.id }}">
+        <span class="device-icon{{ ' on' if d.connected }}">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="3"/><path d="M11 18h2"/></svg>
+        </span>
+        <div class="grow">
+          <b>{{ d.name }}</b>
+          <div class="small" data-k="device-status">
+            {% if d.connected %}<span class="ok-text">● Connected{% if d.node_name %} to {{ d.node_name }}{% endif %}</span> <span class="muted">· ↓{{ d.down|bytes }} ↑{{ d.up|bytes }}</span>
+            {% elif d.kicked %}<span class="muted">Disconnected from here — can reconnect in a few minutes</span>
+            {% elif d.blocked %}<span class="warn-text">Can't connect — all your connections are in use</span>
+            {% elif d.last_handshake %}<span class="muted">Last connected {{ d.last_handshake|ago }}</span>
+            {% else %}<span class="muted">Not set up yet — <a href="/portal?device={{ d.id }}#locations">download a location</a></span>{% endif %}
+          </div>
+        </div>
+        {% if d.connected %}
+        <form method="post" action="/portal/devices/{{ d.id }}/disconnect" data-confirm="Disconnect {{ d.name }}? It drops off the VPN within ~15 seconds so another device can use the connection." data-confirm-label="Disconnect">
+          <button class="btn sm">Disconnect</button></form>
+        {% endif %}
+        <details class="menu row-menu"><summary class="btn sm ghost" aria-label="More actions">•••</summary>
+          <div class="menu-pop">
+            <a href="/portal?device={{ d.id }}#locations">Download configs</a>
+            <button type="button" data-open="rename-{{ d.id }}">Rename</button>
+            <form method="post" action="/portal/devices/{{ d.id }}/delete" data-confirm="Remove {{ d.name }}? Its configs stop working within ~15 seconds. Use this if the device was lost or sold." data-confirm-label="Remove device">
+              <button style="color:var(--bad)">Remove</button></form>
+          </div>
+        </details>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+</section>
+
 <!-- servers -->
-<section>
+<section id="locations">
   <div class="section-head">
     <div><h2>Locations</h2><span class="muted small">{{ nodes|selectattr('online')|list|length }} of {{ nodes|length }} online</span></div>
     {% if nodes %}
     <div class="toolbar">
+      <label class="device-pick" {{ 'hidden' if devices|length < 2 }}>Setting up
+        <select id="device-pick">
+          {% for d in devices %}<option value="{{ d.id }}" {{ 'selected' if d.id == selected.id }}>{{ d.name }}</option>{% endfor %}
+        </select></label>
       {% if nodes|length > 6 %}
-      <label class="search sr-label" style="margin:0">
+      <label class="search" style="margin:0">
         <span class="sr-only">Search locations</span>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
         <input type="search" placeholder="Search country or city" data-filter="#server-list">
       </label>
       {% endif %}
-      <a class="btn" href="/portal/configs.zip" title="One file per location, for importing into WireGuard on a computer">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16"/></svg>
-        All locations (.zip)</a>
+      <a class="btn" data-device-href="/portal/configs.zip" href="/portal/configs.zip?device={{ selected.id }}" title="One file per location, for importing into WireGuard on a computer">
+        {{ icon_dl }} All locations (.zip)</a>
     </div>
     {% endif %}
   </div>
@@ -106,9 +165,7 @@
         <span data-k="load">{{ load_label(n.load) }}</span>
       </div>
       <div class="server-actions">
-        <a class="btn primary" href="/portal/config/{{ n.id }}.conf">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16"/></svg>
-          Download</a>
+        <a class="btn primary" data-device-href="/portal/config/{{ n.id }}.conf" href="/portal/config/{{ n.id }}.conf?device={{ selected.id }}">{{ icon_dl }} Download</a>
         <button class="btn" data-open="qr-{{ n.id }}" title="Show QR code to scan with your phone">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 17h4v4"/></svg>
           QR</button>
@@ -120,43 +177,81 @@
   {% endif %}
 </section>
 
-{% endif %}
-
 <!-- account -->
 <section id="account">
   <div class="section-head"><h2>Account</h2></div>
   <div class="cols-2">
+    <div class="card plan-card">
+      <div class="plan-head">
+        <div>
+          <div class="muted small">Your plan</div>
+          <h2 style="font-size:22px">{{ plan.name if plan else 'Admin access' }}</h2>
+        </div>
+        {% if user.sub_status == 'past_due' %}<span class="pill off">Payment failed</span>
+        {% elif user.cancel_at_period_end %}<span class="pill warn">Cancels {{ renews }}</span>
+        {% elif user.plan_source == 'manual' %}<span class="pill accent">Complimentary</span>
+        {% elif plan %}<span class="pill on">Active</span>{% endif %}
+      </div>
+      <ul class="perks" style="margin-top:10px">
+        <li>{{ limit }} device{{ 's' if limit != 1 }} connected at a time</li>
+        <li>All {{ nodes|length }} location{{ 's' if nodes|length != 1 }}</li>
+        {% if user.plan_source == 'stripe' and renews %}<li>{{ 'Access until' if user.cancel_at_period_end else 'Renews' }} {{ renews }}{% if price_labels[plan_key] %} · {{ price_labels[plan_key] }}{% endif %}</li>{% endif %}
+      </ul>
+      {% if user.sub_status == 'past_due' %}<p class="small" style="color:var(--bad);margin-top:10px">We couldn't charge your card. Update your payment method to keep your VPN running.</p>{% endif %}
+      <div class="toolbar" style="margin-top:16px">
+        {% if user.plan_source == 'stripe' and billing_enabled %}
+          {% for key, p in plans.items() if key != plan_key and p.price_id %}
+          <form method="post" action="/billing/change" data-confirm="Switch to {{ p.name }} ({{ p.devices }} device{{ 's' if p.devices != 1 }} at a time{% if price_labels[key] %}, {{ price_labels[key] }}{% endif %})? The price difference is prorated." data-confirm-label="Switch plan">
+            <input type="hidden" name="plan" value="{{ key }}">
+            <button class="btn {{ 'primary' if p.devices > limit }}">{{ 'Upgrade' if p.devices > limit else 'Switch' }} to {{ p.name }}</button></form>
+          {% endfor %}
+          <form method="post" action="/billing/portal"><button class="btn">Manage billing</button></form>
+        {% endif %}
+      </div>
+    </div>
     <form class="card" method="post" action="/account/password">
       <h3>Change password</h3>
+      <p class="muted small" style="margin:0">Signed in as {{ user.email }}</p>
       <label>Current password <span class="pw"><input type="password" name="current" autocomplete="current-password" required><button type="button" class="btn ghost" data-reveal>Show</button></span></label>
       <label>New password <span class="hint">· at least 8 characters</span><span class="pw"><input type="password" name="new" minlength="8" autocomplete="new-password" required><button type="button" class="btn ghost" data-reveal>Show</button></span></label>
       <button class="btn" style="margin-top:16px">Update password</button>
     </form>
-    <div class="card">
-      <h3>Connection details</h3>
-      <p class="muted small">Email: {{ user.email }}<br>Tunnel IP: <span class="mono">{{ vpn_ip }}</span><br>Status:
-        <span class="pill {{ 'on' if user.status == 'active' else 'off' }}">{{ user.status|capitalize }}</span></p>
-      <h3 style="margin-top:18px">Lost a device?</h3>
-      <p class="muted small">Reset your keys to cut off every device using your current setup. You'll need to re-add your locations afterwards.</p>
-      <form method="post" action="/portal/rotate-key" data-confirm="All devices using your current configs will be disconnected within ~15 seconds. You'll need to download your locations again." data-confirm-label="Reset keys">
-        <button class="btn danger">Reset my keys</button>
-      </form>
-    </div>
   </div>
 </section>
 </div>
 {% endblock %}
 
 {% block dialogs %}
-{% if user.status == 'active' %}
 {% for n in nodes %}
 <dialog id="qr-{{ n.id }}">
   <div class="dlg-head"><h2 class="cell-main"><span class="flag sm">{{ n.country|flag }}</span>{{ n.name }}</h2><button class="btn ghost icon" data-close aria-label="Close">✕</button></div>
   <div class="dlg-body" style="text-align:center">
-    <div class="qr-box"><img loading="lazy" src="/portal/qr/{{ n.id }}.svg" alt="QR code for {{ n.name }}"></div>
+    <p class="muted small" style="margin-top:14px">For <b data-k="device-name">{{ selected.name }}</b></p>
+    <div class="qr-box"><img data-device-src="/portal/qr/{{ n.id }}.svg" data-src="/portal/qr/{{ n.id }}.svg?device={{ selected.id }}" alt="QR code for {{ n.name }}"></div>
     <p class="muted small">In WireGuard on your phone, tap <b>+</b> → <b>Scan from QR code</b>.<br>Keep this code private — it's your personal key.</p>
   </div>
 </dialog>
 {% endfor %}
-{% endif %}
+
+<dialog id="add-device">
+  <form method="post" action="/portal/devices">
+    <div class="dlg-head"><h2>Add a device</h2><button type="button" class="btn ghost icon" data-close aria-label="Close">✕</button></div>
+    <div class="dlg-body">
+      <p class="muted small" style="margin-top:14px">Each device gets its own key, so you can remove one (if it's lost) without touching the others.
+        You can add up to {{ max_devices }}; {{ limit }} can be connected at the same time.</p>
+      <label>Device name <input name="name" id="device-name" maxlength="40" placeholder="e.g. Sam's iPhone" required></label>
+    </div>
+    <div class="dlg-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add device</button></div>
+  </form>
+</dialog>
+
+{% for d in devices %}
+<dialog id="rename-{{ d.id }}">
+  <form method="post" action="/portal/devices/{{ d.id }}/rename">
+    <div class="dlg-head"><h2>Rename device</h2><button type="button" class="btn ghost icon" data-close aria-label="Close">✕</button></div>
+    <div class="dlg-body"><label>Name <input name="name" maxlength="40" value="{{ d.name }}" required></label></div>
+    <div class="dlg-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div>
+  </form>
+</dialog>
+{% endfor %}
 {% endblock %}

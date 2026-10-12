@@ -133,35 +133,62 @@
     $$('[data-desktop-only]').forEach(el => (el.hidden = isMobile));
     $$('[data-mobile-only]').forEach(el => (el.hidden = !isMobile));
 
-    let wasConnected = !!$('.hero.connected');
+    // "Setting up: <device>" picker rewrites every download / QR link for the chosen device
+    const pick = $('#device-pick');
+    const applyDevice = () => {
+      if (!pick) return;
+      const id = pick.value, name = pick.selectedOptions[0]?.textContent || '';
+      $$('[data-device-href]').forEach(a => (a.href = `${a.dataset.deviceHref}?device=${id}`));
+      $$('[data-device-src]').forEach(img => {
+        img.dataset.src = `${img.dataset.deviceSrc}?device=${id}`;
+        if (img.getAttribute('src')) img.src = img.dataset.src;
+      });
+      $$('[data-k=device-name]').forEach(el => (el.textContent = name));
+    };
+    pick?.addEventListener('change', () => {
+      applyDevice();
+      const u = new URL(location.href); u.searchParams.set('device', pick.value); history.replaceState(null, '', u);
+    });
+    applyDevice();
+    // QR codes load only when their dialog opens (and reload after switching device)
+    document.addEventListener('click', e => {
+      const b = e.target.closest('[data-open^="qr-"]');
+      const img = b && $(`#${b.dataset.open} img[data-src]`);
+      if (img && img.getAttribute('src') !== img.dataset.src) img.src = img.dataset.src;
+    });
+    // Suggest a device name from the browser
+    const nameInput = $('#device-name');
+    if (nameInput) nameInput.value = { ios: 'iPhone', android: 'Android phone', windows: 'Windows PC', macos: 'Mac', linux: 'Linux PC' }[os] || '';
+
+    let wasConnected = $$('.device-icon.on').length;
+    let signature = null;
     poll('/portal/status.json', data => {
-      let current = null;
+      const sig = JSON.stringify(data.devices.map(d => [d.id, d.connected, d.blocked, d.kicked, d.node_name]));
+      if (signature !== null && sig !== signature && !$('dialog[open]')) {
+        // connection state changed: reload so devices, limits and notices are all consistent
+        const n = data.devices.filter(d => d.connected).length;
+        if (n > wasConnected) sessionStorage.setItem('vn-toast', `Connected ✓ ${data.devices.find(d => d.connected)?.name || ''}`);
+        location.reload(); return;
+      }
+      signature = sig;
+      // live traffic counters without reloading
+      const live = data.devices.filter(d => d.connected);
+      if (live.length) {
+        $('[data-k=down]').textContent = fmtBytes(live.reduce((a, d) => a + d.down, 0));
+        $('[data-k=up]').textContent = fmtBytes(live.reduce((a, d) => a + d.up, 0));
+      }
       for (const n of data.nodes) {
         const card = $(`[data-node="${n.id}"]`);
         if (!card) continue;
-        card.classList.toggle('is-connected', n.connected);
         card.classList.toggle('is-offline', !n.online);
-        $('[data-k=status]', card).outerHTML = n.connected
-          ? '<span class="pill on" data-k="status"><span class="dot live"></span>Connected</span>'
-          : n.online ? '<span class="pill neutral" data-k="status">Online</span>'
-          : '<span class="pill off" data-k="status">Offline</span>';
         const m = $('.meter', card);
         m.className = 'meter' + (n.load >= 80 ? ' high' : n.load >= 50 ? ' mid' : '');
         $('i', m).style.width = Math.max(4, n.load) + '%';
         $('[data-k=load]', card).textContent = n.load >= 80 ? 'Busy' : n.load >= 50 ? 'Moderate' : 'Low load';
-        if (n.connected) current = n;
       }
-      const hero = $('.hero');
-      hero.classList.toggle('connected', !!current);
-      $('[data-k=hero-title]').textContent = current ? `Protected · ${current.name}` : 'Not connected';
-      $('[data-k=hero-sub]').textContent = current
-        ? 'Your traffic is encrypted and routed through the VPN.'
-        : 'Turn on a tunnel in the WireGuard app to get protected.';
-      $('[data-k=down]').textContent = current ? fmtBytes(current.down) : '—';
-      $('[data-k=up]').textContent = current ? fmtBytes(current.up) : '—';
-      if (current && !wasConnected) toast(`You're connected to ${current.name} 🎉`);
-      wasConnected = !!current;
     }, 8000);
+    const pending = sessionStorage.getItem('vn-toast');
+    if (pending) { sessionStorage.removeItem('vn-toast'); toast(pending); }
   }
 
   // ---------------------------------------------------------------- admin

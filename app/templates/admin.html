@@ -13,6 +13,16 @@
     Add server</button>
 </div>
 
+{% if not billing_enabled or not webhook_configured %}
+<div class="card notice warn" style="margin-bottom:18px">
+  <div><b>{{ 'Stripe isn\'t connected yet' if not billing_enabled else 'Stripe webhook secret missing' }}.</b>
+    {% if not billing_enabled %}Customers can see plans but can't pay. Set <code>STRIPE_SECRET_KEY</code>, <code>STRIPE_PRICE_BASIC</code> and <code>STRIPE_PRICE_PRO</code>.
+    {% else %}Checkout works, but renewals, cancellations and failed payments won't sync. Set <code>STRIPE_WEBHOOK_SECRET</code> for <code>{{ panel }}/billing/webhook</code>.{% endif %}
+    You can still grant plans manually from the Users tab.</div>
+</div>
+{% endif %}
+{% set paying = users|selectattr('access')|rejectattr('is_admin')|list %}
+
 <div class="tabs" data-tabs role="tablist">
   <button data-tab="overview" role="tab">Overview</button>
   <button data-tab="servers" role="tab">Servers <span class="count">{{ nodes|length }}</span></button>
@@ -24,8 +34,9 @@
   <div class="stats">
     <div class="card stat"><div class="k">Servers online</div><div class="v" data-k="online">{{ online|length }}/{{ nodes|length }}</div></div>
     <div class="card stat"><div class="k">Connected right now</div><div class="v" data-k="active">{{ nodes|sum(attribute='active_peers') }}</div></div>
-    <div class="card stat"><div class="k">Customers</div><div class="v">{{ users|selectattr('status', 'equalto', 'active')|list|length }}</div>
-      <div class="muted small">{{ users|selectattr('status', 'equalto', 'suspended')|list|length }} suspended</div></div>
+    <div class="card stat"><div class="k">Subscribers</div><div class="v">{{ paying|length }}</div>
+      <div class="muted small">{% for key, p in plans.items() %}{{ p.name }}: {{ paying|selectattr('plan', 'equalto', key)|list|length }}{{ ' · ' if not loop.last }}{% endfor %}
+        · {{ users|length - paying|length - users|selectattr('is_admin')|list|length }} not subscribed</div></div>
     <div class="card stat"><div class="k">Total traffic</div><div class="v">{{ (nodes|sum(attribute='rx') + nodes|sum(attribute='tx'))|bytes }}</div></div>
   </div>
 
@@ -106,7 +117,8 @@
         <input type="search" placeholder="Search by email" data-filter="#user-rows"></label>
       <div class="chips">
         <button class="chip active" data-chip="" data-chip-for="#user-rows">All</button>
-        <button class="chip" data-chip="active" data-chip-for="#user-rows">Active</button>
+        <button class="chip" data-chip="subscribed" data-chip-for="#user-rows">Subscribed</button>
+        <button class="chip" data-chip="unpaid" data-chip-for="#user-rows">Not subscribed</button>
         <button class="chip" data-chip="suspended" data-chip-for="#user-rows">Suspended</button>
         <button class="chip" data-chip="admin" data-chip-for="#user-rows">Admins</button>
       </div>
@@ -116,16 +128,21 @@
       Add user</button>
   </div>
   <div class="card table-card"><div class="table-wrap"><table>
-    <thead><tr><th>User</th><th>Status</th><th class="hide-sm">Traffic</th><th class="hide-sm">Last connected</th><th class="hide-sm">Joined</th><th></th></tr></thead>
+    <thead><tr><th>User</th><th>Plan</th><th>Status</th><th class="hide-sm">Devices</th><th class="hide-sm">Traffic</th><th class="hide-sm">Last connected</th><th></th></tr></thead>
     <tbody id="user-rows">
     {% for u in users %}
-    <tr data-tags="{{ u.status }}{{ ' admin' if u.is_admin }}">
+    <tr data-tags="{{ u.status }}{{ ' admin' if u.is_admin }} {{ 'subscribed' if u.access and u.plan else 'unpaid' if not u.is_admin }}">
       <td><div class="cell-main"><span class="avatar">{{ u.email[0] }}</span>
-        <div>{{ u.email }}{% if u.is_admin %} <span class="pill accent">Admin</span>{% endif %}</div></div></td>
+        <div>{{ u.email }}{% if u.is_admin %} <span class="pill accent">Admin</span>{% endif %}
+          <div class="muted small">Joined {{ u.created_at|ago }}</div></div></div></td>
+      <td>{% if u.plan in plans %}<b>{{ plans[u.plan].name }}</b>
+            <div class="muted small">{% if u.plan_source == 'manual' %}Complimentary{% elif u.cancel_at_period_end %}Cancelling{% else %}{{ u.sub_status|replace('_', ' ')|capitalize or 'Stripe' }}{% endif %}</div>
+          {% elif u.is_admin %}<span class="muted">Admin</span>
+          {% else %}<span class="muted">None</span>{% if u.sub_status == 'canceled' %}<div class="muted small">Cancelled</div>{% endif %}{% endif %}</td>
       <td><span class="pill {{ 'on' if u.status == 'active' else 'off' }}">{{ u.status|capitalize }}</span></td>
+      <td class="hide-sm">{{ u.device_count }}</td>
       <td class="hide-sm">{{ u.traffic|bytes }}</td>
       <td class="hide-sm muted">{{ u.last_hs|ago if u.last_hs else 'never' }}</td>
-      <td class="hide-sm muted">{{ u.created_at|ago }}</td>
       <td class="actions">
         {% if u.id != user.id %}
         {% if u.status == 'active' %}
@@ -135,6 +152,12 @@
         {% endif %}
         <details class="menu row-menu"><summary class="btn sm ghost" aria-label="More actions">•••</summary>
           <div class="menu-pop">
+            {% if not (u.plan_source == 'stripe' and u.access) %}
+            {% for key, p in plans.items() if not (u.plan == key and u.plan_source == 'manual') %}
+            <form method="post" action="/admin/users/{{ u.id }}/plan"><input type="hidden" name="plan" value="{{ key }}"><button>Give {{ p.name }} free</button></form>
+            {% endfor %}
+            {% if u.plan_source == 'manual' %}<form method="post" action="/admin/users/{{ u.id }}/plan"><input type="hidden" name="plan" value=""><button>Remove free plan</button></form>{% endif %}
+            {% endif %}
             <form method="post" action="/admin/users/{{ u.id }}/{{ 'demote' if u.is_admin else 'promote' }}"><button>{{ 'Remove admin rights' if u.is_admin else 'Make admin' }}</button></form>
             <form method="post" action="/admin/users/{{ u.id }}/delete" data-confirm="Permanently delete {{ u.email }}? This can't be undone." data-confirm-label="Delete user"><button style="color:var(--bad)">Delete user</button></form>
           </div>
@@ -143,7 +166,7 @@
       </td>
     </tr>
     {% endfor %}
-    <tr data-static="1" data-empty-for="#user-rows" hidden><td colspan="6" class="empty">No users match.</td></tr>
+    <tr data-static="1" data-empty-for="#user-rows" hidden><td colspan="7" class="empty">No users match.</td></tr>
     </tbody>
   </table></div></div>
   <p class="muted small" style="margin-top:14px">
@@ -240,6 +263,10 @@
     <div class="dlg-body">
       <label>Email <input name="email" type="email" required></label>
       <label>Password <span class="hint">· leave blank to generate one</span><input name="password" minlength="8"></label>
+      <label>Plan <span class="hint">· granted free, no payment needed</span>
+        <select name="plan"><option value="">None — they'll choose and pay themselves</option>
+          {% for key, p in plans.items() %}<option value="{{ key }}">{{ p.name }} ({{ p.devices }} device{{ 's' if p.devices != 1 }} at a time)</option>{% endfor %}
+        </select></label>
       <label class="check" style="margin-top:16px"><input type="checkbox" name="is_admin" value="1"> Admin access</label>
     </div>
     <div class="dlg-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Create user</button></div>

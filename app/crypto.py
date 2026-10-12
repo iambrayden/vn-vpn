@@ -9,8 +9,8 @@ import secrets
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
-# Every node runs the same tunnel subnet; a user gets the same address on every node,
-# derived from their user id, so no per-node IP allocation is needed.
+# Every node runs the same tunnel subnet; each device gets one address that is valid on every node,
+# so no per-node IP allocation is needed.
 VPN_SUBNET = ipaddress.ip_network(os.environ.get("VPN_SUBNET", "10.66.0.0/16"))
 CLIENT_DNS = os.environ.get("CLIENT_DNS", "1.1.1.1, 1.0.0.1")
 PBKDF2_ROUNDS = 260_000
@@ -48,20 +48,29 @@ def server_address() -> str:
     return f"{VPN_SUBNET.network_address + 1}/{VPN_SUBNET.prefixlen}"
 
 
-def client_ip(user_id: int) -> str:
-    # .0 network, .1 is the node itself; users start at .2
-    offset = user_id + 1
+def client_ip(offset: int) -> str:
+    """Tunnel address at a given offset (.0 is the network, .1 the node itself)."""
+    offset = offset + 1
     if offset >= VPN_SUBNET.num_addresses - 1:
         raise ValueError("VPN subnet exhausted; widen VPN_SUBNET")
     return str(VPN_SUBNET.network_address + offset)
 
 
-def client_config(user, node) -> str:
+def allocate_address(conn) -> str:
+    """Lowest tunnel address not yet used by any device."""
+    used = {r[0] for r in conn.execute("SELECT address FROM devices")}
+    offset = 1
+    while client_ip(offset) in used:
+        offset += 1
+    return client_ip(offset)
+
+
+def client_config(device, node, email: str) -> str:
     return (
         "[Interface]\n"
-        f"# {node['name']} ({node['location']}) - {user['email']}\n"
-        f"PrivateKey = {user['private_key']}\n"
-        f"Address = {client_ip(user['id'])}/32\n"
+        f"# {node['name']} ({node['location']}) - {device['name']} - {email}\n"
+        f"PrivateKey = {device['private_key']}\n"
+        f"Address = {device['address']}/32\n"
         f"DNS = {CLIENT_DNS}\n"
         "\n"
         "[Peer]\n"

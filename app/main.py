@@ -3,6 +3,7 @@ import io
 import os
 import re
 import secrets
+import time
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import countries, crypto, db
+from . import billing, countries, crypto, db
 
 BASE = Path(__file__).parent
 AGENT_DIR = BASE.parent / "agent"
@@ -84,6 +85,7 @@ templates.env.filters["bytes"] = human_bytes
 templates.env.filters["ago"] = ago
 templates.env.filters["flag"] = countries.flag
 templates.env.globals["countries"] = countries.COUNTRIES
+templates.env.globals["plans"] = billing.PLANS
 
 
 # --------------------------------------------------------------------------- helpers
@@ -114,7 +116,7 @@ def client_ip_of(request: Request) -> str:
     return request.headers.get("x-real-ip") or (request.client.host if request.client else "")
 
 
-def create_user(conn, email: str, password: str, is_admin=False):
+def create_user(conn, email: str, password: str, is_admin=False, plan=""):
     email = email.strip().lower()
     if not EMAIL_RE.match(email):
         raise ValueError("Please enter a valid email address.")
@@ -122,10 +124,14 @@ def create_user(conn, email: str, password: str, is_admin=False):
         raise ValueError("Password must be at least 8 characters.")
     if conn.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone():
         raise ValueError("An account with that email already exists.")
+    if plan and plan not in billing.PLANS:
+        raise ValueError(f"Unknown plan '{plan}'. Use one of: {', '.join(billing.PLANS)}.")
+    # users.private_key/public_key predate per-device keys; still filled because the columns are NOT NULL
     priv, pub = crypto.wg_keypair()
     cur = conn.execute(
-        "INSERT INTO users (email, password_hash, is_admin, private_key, public_key) VALUES (?,?,?,?,?)",
-        (email, crypto.hash_password(password), int(is_admin), priv, pub),
+        "INSERT INTO users (email, password_hash, is_admin, private_key, public_key, plan, plan_source) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (email, crypto.hash_password(password), int(is_admin), priv, pub, plan, "manual" if plan else ""),
     )
     return cur.lastrowid
 
@@ -186,7 +192,7 @@ def startup():
 async def http_error(request: Request, exc: StarletteHTTPException):
     if exc.status_code == 303:
         return RedirectResponse(exc.headers["Location"], status_code=303)
-    if request.url.path.startswith("/api/") or request.url.path.startswith("/agent/"):
+    if request.url.path.startswith(("/api/", "/agent/", "/billing/webhook")):
         return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
     resp = render(request, "error.html", code=exc.status_code, detail=exc.detail)
     resp.status_code = exc.status_code
@@ -237,7 +243,7 @@ def signup(request: Request, email: str = Form(...), password: str = Form(...)):
         flash(request, str(e), "error")
         return RedirectResponse("/signup", status_code=303)
     request.session["uid"] = uid
-    flash(request, "Welcome! Your VPN account is ready — pick a server below.")
+    flash(request, "Welcome! Pick a plan to start using the VPN.")
     return RedirectResponse("/portal", status_code=303)
 
 
@@ -247,21 +253,69 @@ def logout(request: Request):
     return RedirectResponse("/login", status_code=303)
 
 
+# --------------------------------------------------------------------------- devices & connection limits
+
+def clean_name(name: str) -> str:
+    name = re.sub(r"[\x00-\x1f\x7f]", "", name or "").strip()
+    return name[:40] or "My device"
+
+
+def user_devices(conn, user):
+    now = time.time()
+    devices = [dict(d) for d in conn.execute("SELECT * FROM devices WHERE user_id = ? ORDER BY id", (user["id"],))]
+    allowed = allowed_device_ids(conn, user_id=user["id"])
+    nodes = {n["id"]: n["name"] for n in conn.execute("SELECT id, name FROM nodes")}
+    for d in devices:
+        last = conn.execute("""SELECT node_id, rx_bytes, tx_bytes FROM device_stats WHERE device_id = ?
+                               ORDER BY last_handshake DESC LIMIT 1""", (d["id"],)).fetchone()
+        d["connected"] = d["id"] in allowed and now - d["last_handshake"] < ACTIVE_WINDOW
+        d["node_id"] = last["node_id"] if last else None
+        d["node_name"] = nodes.get(d["node_id"], "") if last else ""
+        d["down"], d["up"] = (last["tx_bytes"], last["rx_bytes"]) if last else (0, 0)
+        d["kicked"] = d["kicked_until"] > now
+        d["blocked"] = not d["kicked"] and d["id"] not in allowed  # waiting for a free slot
+    return devices
+
+
+def allowed_device_ids(conn, user_id=None) -> set[int]:
+    """Devices that servers should accept right now.
+
+    Each plan allows N devices connected at the same time. While fewer than N are connected every device may
+    connect; once N are, only those keep their slot (first connected wins) until one goes idle for
+    ACTIVE_WINDOW seconds or is disconnected from the portal."""
+    now = time.time()
+    sql = """SELECT d.id, d.user_id, d.last_handshake, d.active_since, d.kicked_until,
+                    u.status, u.is_admin, u.plan, u.plan_source, u.sub_status
+             FROM devices d JOIN users u ON u.id = d.user_id"""
+    rows = conn.execute(sql + (" WHERE d.user_id = ?" if user_id else ""), (user_id,) if user_id else ()).fetchall()
+    by_user: dict[int, list] = {}
+    for r in rows:
+        by_user.setdefault(r["user_id"], []).append(r)
+    allowed = set()
+    for devs in by_user.values():
+        limit = billing.device_limit(devs[0])
+        if limit <= 0:
+            continue
+        candidates = [d for d in devs if d["kicked_until"] <= now]
+        live = sorted((d for d in candidates if now - d["last_handshake"] < ACTIVE_WINDOW),
+                      key=lambda d: (d["active_since"] or d["last_handshake"], d["id"]))
+        chosen = live[:limit] if len(live) >= limit else candidates
+        allowed.update(d["id"] for d in chosen)
+    return allowed
+
+
 # --------------------------------------------------------------------------- client portal
 
-def portal_nodes(conn, user):
-    """Servers visible to a client, with their own connection state and server load."""
+def portal_nodes(conn, devices):
+    """Servers visible to a client, with load and which of their devices is on it."""
     nodes = visible_nodes(conn)
-    now = now_utc().timestamp()
-    stats = {r["node_id"]: r for r in conn.execute("SELECT * FROM peer_stats WHERE user_id = ?", (user["id"],))}
+    now = time.time()
     active = {r["node_id"]: r["n"] for r in conn.execute(
-        "SELECT node_id, COUNT(*) n FROM peer_stats WHERE last_handshake > ? GROUP BY node_id",
+        "SELECT node_id, COUNT(*) n FROM device_stats WHERE last_handshake > ? GROUP BY node_id",
         (now - ACTIVE_WINDOW,))}
     for n in nodes:
-        s = stats.get(n["id"])
-        n["connected"] = bool(s and now - s["last_handshake"] < ACTIVE_WINDOW)
-        # rx/tx are from the server's point of view: server rx = client upload
-        n["down"], n["up"] = (s["tx_bytes"], s["rx_bytes"]) if s else (0, 0)
+        n["devices_here"] = [d["name"] for d in devices if d["connected"] and d["node_id"] == n["id"]]
+        n["connected"] = bool(n["devices_here"])
         n["load"] = min(100, round(100 * active.get(n["id"], 0) / NODE_CAPACITY))
         n["country_name"] = countries.COUNTRIES.get(n["country"], "")
         n["recommended"] = False
@@ -272,24 +326,52 @@ def portal_nodes(conn, user):
     return nodes
 
 
+def plan_context(user):
+    plan = billing.PLANS.get(user["plan"])
+    return {
+        "plan": plan, "plan_key": user["plan"], "limit": billing.device_limit(user),
+        "renews": datetime.fromtimestamp(user["period_end"], timezone.utc).strftime("%b %-d, %Y")
+        if user["period_end"] else "",
+        "billing_enabled": billing.enabled(),
+        "price_labels": {k: billing.price_label(k) for k in billing.PLANS} if billing.enabled()
+        else {k: p["price_label"] for k, p in billing.PLANS.items()},
+    }
+
+
 @app.get("/portal", response_class=HTMLResponse)
 def portal(request: Request):
     user = require_user(request)
+    if not billing.has_access(user):
+        return render(request, "pricing.html", **plan_context(user))
     with db.session() as conn:
-        nodes = portal_nodes(conn, user)
-        ever_connected = conn.execute("SELECT 1 FROM peer_stats WHERE user_id = ? AND last_handshake > 0",
-                                      (user["id"],)).fetchone() is not None
-    return render(request, "portal.html", nodes=nodes, vpn_ip=crypto.client_ip(user["id"]),
-                  connected=next((n for n in nodes if n["connected"]), None), ever_connected=ever_connected)
+        if not conn.execute("SELECT 1 FROM devices WHERE user_id = ?", (user["id"],)).fetchone():
+            add_device(conn, user, "My device")  # first visit after subscribing: one ready-to-use device
+        devices = user_devices(conn, user)
+        nodes = portal_nodes(conn, devices)
+    connected = [d for d in devices if d["connected"]]
+    return render(request, "portal.html", nodes=nodes, devices=devices, connected=connected,
+                  ever_connected=any(d["last_handshake"] for d in devices), max_devices=billing.MAX_DEVICES,
+                  **plan_context(user))
+
+
+@app.get("/pricing", response_class=HTMLResponse)
+def pricing(request: Request):
+    user = require_user(request)
+    return render(request, "pricing.html", **plan_context(user))
 
 
 @app.get("/portal/status.json")
 def portal_status(request: Request):
     user = require_user(request)
     with db.session() as conn:
-        nodes = portal_nodes(conn, user)
-    return {"nodes": [{k: n[k] for k in ("id", "name", "online", "connected", "down", "up", "load")}
-                      for n in nodes]}
+        devices = user_devices(conn, user)
+        nodes = portal_nodes(conn, devices)
+    return {
+        "limit": billing.device_limit(user),
+        "devices": [{k: d[k] for k in ("id", "name", "connected", "blocked", "kicked", "node_name", "down", "up")}
+                    for d in devices],
+        "nodes": [{k: n[k] for k in ("id", "name", "online", "connected", "devices_here", "load")} for n in nodes],
+    }
 
 
 @app.post("/account/password")
@@ -303,18 +385,83 @@ def change_password(request: Request, current: str = Form(...), new: str = Form(
         with db.session() as conn:
             conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (crypto.hash_password(new), user["id"]))
         flash(request, "Password updated.")
-    return RedirectResponse(request.headers.get("referer") or "/portal", status_code=303)
+    return RedirectResponse("/portal#account", status_code=303)
 
 
-def _user_node(request: Request, node_id: int):
+def add_device(conn, user, name: str) -> int:
+    priv, pub = crypto.wg_keypair()
+    cur = conn.execute("INSERT INTO devices (user_id, name, private_key, public_key, address) VALUES (?,?,?,?,?)",
+                       (user["id"], clean_name(name), priv, pub, crypto.allocate_address(conn)))
+    return cur.lastrowid
+
+
+def require_access(request: Request):
     user = require_user(request)
-    if user["status"] != "active":
-        raise HTTPException(403, "Your account is suspended.")
+    if not billing.has_access(user):
+        raise HTTPException(303, headers={"Location": "/portal"})
+    return user
+
+
+def _own_device(conn, user, device_id: int):
+    d = conn.execute("SELECT * FROM devices WHERE id = ? AND user_id = ?", (device_id, user["id"])).fetchone()
+    if not d:
+        raise HTTPException(404, "Device not found.")
+    return d
+
+
+@app.post("/portal/devices")
+def portal_add_device(request: Request, name: str = Form("")):
+    user = require_access(request)
     with db.session() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM devices WHERE user_id = ?", (user["id"],)).fetchone()[0]
+        if count >= billing.MAX_DEVICES:
+            flash(request, f"You can have up to {billing.MAX_DEVICES} devices. Remove one you no longer use.", "error")
+            return RedirectResponse("/portal#devices", status_code=303)
+        device_id = add_device(conn, user, name)
+    flash(request, f"Added {clean_name(name)}. Now download a location for it below.")
+    return RedirectResponse(f"/portal?device={device_id}#locations", status_code=303)
+
+
+@app.post("/portal/devices/{device_id}/rename")
+def portal_rename_device(request: Request, device_id: int, name: str = Form(...)):
+    user = require_access(request)
+    with db.session() as conn:
+        _own_device(conn, user, device_id)
+        conn.execute("UPDATE devices SET name = ? WHERE id = ?", (clean_name(name), device_id))
+    return RedirectResponse("/portal#devices", status_code=303)
+
+
+@app.post("/portal/devices/{device_id}/disconnect")
+def portal_disconnect_device(request: Request, device_id: int):
+    """Free a connection slot right away (e.g. to switch from laptop to phone)."""
+    user = require_access(request)
+    with db.session() as conn:
+        d = _own_device(conn, user, device_id)
+        # Block long enough for its last handshake to go stale, so it can't reclaim the slot it just gave up.
+        conn.execute("UPDATE devices SET kicked_until = ?, active_since = 0 WHERE id = ?",
+                     (int(time.time()) + ACTIVE_WINDOW + 30, device_id))
+    flash(request, f"{d['name']} disconnected. Your other device can connect now (within ~15 seconds).")
+    return RedirectResponse("/portal#devices", status_code=303)
+
+
+@app.post("/portal/devices/{device_id}/delete")
+def portal_delete_device(request: Request, device_id: int):
+    user = require_user(request)
+    with db.session() as conn:
+        d = _own_device(conn, user, device_id)
+        conn.execute("DELETE FROM devices WHERE id = ?", (device_id,))
+    flash(request, f"Removed {d['name']}. Its configs stop working within ~15 seconds.")
+    return RedirectResponse("/portal#devices", status_code=303)
+
+
+def _device_node(request: Request, node_id: int, device_id: int):
+    user = require_access(request)
+    with db.session() as conn:
+        device = _own_device(conn, user, device_id)
         node = conn.execute("SELECT * FROM nodes WHERE id = ? AND enabled = 1", (node_id,)).fetchone()
     if not node:
         raise HTTPException(404, "Server not found.")
-    return user, node
+    return user, device, node
 
 
 def _conf_name(node) -> str:
@@ -326,30 +473,29 @@ def _conf_name(node) -> str:
 
 
 @app.get("/portal/config/{node_id}.conf")
-def download_config(request: Request, node_id: int):
-    user, node = _user_node(request, node_id)
+def download_config(request: Request, node_id: int, device: int):
+    user, dev, node = _device_node(request, node_id, device)
     return PlainTextResponse(
-        crypto.client_config(user, node),
+        crypto.client_config(dev, node, user["email"]),
         headers={"Content-Disposition": f'attachment; filename="{_conf_name(node)}.conf"'},
     )
 
 
 @app.get("/portal/qr/{node_id}.svg")
-def config_qr(request: Request, node_id: int):
-    user, node = _user_node(request, node_id)
-    img = qrcode.make(crypto.client_config(user, node), image_factory=qrcode.image.svg.SvgPathImage,
+def config_qr(request: Request, node_id: int, device: int):
+    user, dev, node = _device_node(request, node_id, device)
+    img = qrcode.make(crypto.client_config(dev, node, user["email"]), image_factory=qrcode.image.svg.SvgPathImage,
                       box_size=8, border=2)
     buf = io.BytesIO()
     img.save(buf)
-    return Response(buf.getvalue(), media_type="image/svg+xml")
+    return Response(buf.getvalue(), media_type="image/svg+xml", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/portal/configs.zip")
-def download_all(request: Request):
-    user = require_user(request)
-    if user["status"] != "active":
-        raise HTTPException(403, "Your account is suspended.")
+def download_all(request: Request, device: int):
+    user = require_access(request)
     with db.session() as conn:
+        dev = _own_device(conn, user, device)
         nodes = conn.execute("SELECT * FROM nodes WHERE enabled = 1").fetchall()
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -359,19 +505,73 @@ def download_all(request: Request):
             if name in used:
                 name = f"{name[:11]}-{n['id']}"[:15]
             used.add(name)
-            zf.writestr(f"{name}.conf", crypto.client_config(user, n))
+            zf.writestr(f"{name}.conf", crypto.client_config(dev, n, user["email"]))
+    fname = re.sub(r"[^A-Za-z0-9_.-]+", "-", f"{BRAND}-{dev['name']}")
     return Response(buf.getvalue(), media_type="application/zip",
-                    headers={"Content-Disposition": f'attachment; filename="{BRAND}-configs.zip"'})
+                    headers={"Content-Disposition": f'attachment; filename="{fname}.zip"'})
 
 
-@app.post("/portal/rotate-key")
-def rotate_key(request: Request):
+# --------------------------------------------------------------------------- billing
+
+@app.post("/billing/checkout")
+def billing_checkout(request: Request, plan: str = Form(...)):
     user = require_user(request)
-    priv, pub = crypto.wg_keypair()
-    with db.session() as conn:
-        conn.execute("UPDATE users SET private_key = ?, public_key = ? WHERE id = ?", (priv, pub, user["id"]))
-    flash(request, "New keys issued. Download your locations again — old configs stop working within ~15 seconds.", "info")
+    if plan not in billing.PLANS or not billing.enabled() or not billing.PLANS[plan]["price_id"]:
+        raise HTTPException(400, "That plan isn't available.")
+    if user["plan_source"] == "stripe" and user["sub_status"] in billing.LIVE_STATUSES:
+        return billing_change(request, plan)  # already subscribed: switch plans instead of a 2nd subscription
+    try:
+        url = billing.checkout_url(user, plan, panel_url(request))
+    except billing.stripe.StripeError as e:
+        flash(request, f"Couldn't start checkout: {e.user_message or 'payment provider error'}", "error")
+        return RedirectResponse("/portal", status_code=303)
+    return RedirectResponse(url, status_code=303)
+
+
+@app.get("/billing/success")
+def billing_success(request: Request, session_id: str = ""):
+    require_user(request)
+    try:
+        with db.session() as conn:
+            billing.complete_checkout(conn, session_id)
+        flash(request, "Payment received — you're all set! Download a location below to connect.")
+    except Exception:  # the webhook will still activate the account
+        flash(request, "Payment received. Your plan activates in a few seconds — refresh if it doesn't.", "info")
     return RedirectResponse("/portal", status_code=303)
+
+
+@app.post("/billing/change")
+def billing_change(request: Request, plan: str = Form(...)):
+    user = require_user(request)
+    if plan not in billing.PLANS or not user["stripe_subscription_id"] or not billing.enabled():
+        raise HTTPException(400, "Can't change plan.")
+    try:
+        with db.session() as conn:
+            billing.change_plan(conn, user, plan)
+        p = billing.PLANS[plan]
+        flash(request, f"You're now on {p['name']} — {p['devices']} device{'s' if p['devices'] > 1 else ''} at a time.")
+    except billing.stripe.StripeError as e:
+        flash(request, f"Couldn't change plan: {e.user_message or 'payment provider error'}", "error")
+    return RedirectResponse("/portal#account", status_code=303)
+
+
+@app.post("/billing/portal")
+def billing_portal(request: Request):
+    user = require_user(request)
+    if not user["stripe_customer_id"] or not billing.enabled():
+        raise HTTPException(400, "No billing account yet.")
+    return RedirectResponse(billing.portal_url(user, f"{panel_url(request)}/portal#account"), status_code=303)
+
+
+@app.post("/billing/webhook")
+async def billing_webhook(request: Request, stripe_signature: str | None = Header(None)):
+    payload = await request.body()
+    try:
+        with db.session() as conn:
+            kind = billing.handle_webhook(conn, payload, stripe_signature)
+    except ValueError:
+        raise HTTPException(400, "Bad signature")
+    return {"received": kind}
 
 
 # --------------------------------------------------------------------------- admin console
@@ -380,7 +580,7 @@ def admin_nodes(conn):
     return [dict(r, online=node_online(r)) for r in conn.execute(f"""
         SELECT n.*, COALESCE(SUM(s.rx_bytes),0) rx, COALESCE(SUM(s.tx_bytes),0) tx,
                COUNT(CASE WHEN s.last_handshake > strftime('%s','now') - {ACTIVE_WINDOW} THEN 1 END) active_peers
-        FROM nodes n LEFT JOIN peer_stats s ON s.node_id = n.id
+        FROM nodes n LEFT JOIN device_stats s ON s.node_id = n.id
         GROUP BY n.id ORDER BY n.id""")]
 
 
@@ -400,14 +600,16 @@ def admin(request: Request):
     require_admin(request)
     with db.session() as conn:
         nodes = admin_nodes(conn)
-        users = conn.execute("""
-            SELECT u.*, COALESCE(SUM(s.rx_bytes + s.tx_bytes),0) traffic, MAX(s.last_handshake) last_hs
-            FROM users u LEFT JOIN peer_stats s ON s.user_id = u.id
-            GROUP BY u.id ORDER BY u.id DESC""").fetchall()
+        users = [dict(u, access=billing.has_access(u)) for u in conn.execute("""
+            SELECT u.*, COALESCE(SUM(s.rx_bytes + s.tx_bytes),0) traffic, MAX(d.last_handshake) last_hs,
+                   COUNT(DISTINCT d.id) device_count
+            FROM users u LEFT JOIN devices d ON d.user_id = u.id LEFT JOIN device_stats s ON s.device_id = d.id
+            GROUP BY u.id ORDER BY u.id DESC""")]
         tokens = conn.execute("SELECT * FROM enroll_tokens WHERE revoked = 0 ORDER BY created_at DESC").fetchall()
     return render(request, "admin.html", nodes=nodes, users=users, tokens=tokens,
                   panel=panel_url(request), now_ts=now_utc().timestamp(),
-                  provision_enabled=bool(PROVISION_API_KEY))
+                  provision_enabled=bool(PROVISION_API_KEY), billing_enabled=billing.enabled(),
+                  webhook_configured=bool(billing.STRIPE_WEBHOOK_SECRET))
 
 
 @app.post("/admin/tokens")
@@ -460,15 +662,33 @@ def admin_delete_node(request: Request, node_id: int):
 
 @app.post("/admin/users")
 def admin_create_user(request: Request, email: str = Form(...), password: str = Form(""),
-                      is_admin: str = Form(None)):
+                      is_admin: str = Form(None), plan: str = Form("")):
     require_admin(request)
     password = password or secrets.token_urlsafe(10)
     try:
         with db.session() as conn:
-            create_user(conn, email, password, is_admin=bool(is_admin))
+            create_user(conn, email, password, is_admin=bool(is_admin), plan=plan)
         flash(request, f"Created {email} — password: {password}", "info")
     except ValueError as e:
         flash(request, str(e), "error")
+    return RedirectResponse("/admin#users", status_code=303)
+
+
+@app.post("/admin/users/{user_id}/plan")
+def admin_set_plan(request: Request, user_id: int, plan: str = Form("")):
+    """Grant a plan without Stripe (friends, testing, invoices paid elsewhere) or remove a manual grant."""
+    require_admin(request)
+    if plan and plan not in billing.PLANS:
+        raise HTTPException(400, "Unknown plan")
+    with db.session() as conn:
+        u = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if u and u["plan_source"] == "stripe" and u["sub_status"] in billing.LIVE_STATUSES:
+            flash(request, "This user pays through Stripe — change or cancel their plan in your Stripe dashboard.",
+                  "error")
+            return RedirectResponse("/admin#users", status_code=303)
+        conn.execute("UPDATE users SET plan = ?, plan_source = ? WHERE id = ?",
+                     (plan, "manual" if plan else "", user_id))
+    flash(request, f"Granted {billing.PLANS[plan]['name']} (free)." if plan else "Plan removed.")
     return RedirectResponse("/admin#users", status_code=303)
 
 
@@ -510,7 +730,7 @@ async def api_create_user(request: Request, x_api_key: str | None = Header(None)
     password = body.get("password") or secrets.token_urlsafe(10)
     try:
         with db.session() as conn:
-            uid = create_user(conn, body.get("email", ""), password)
+            uid = create_user(conn, body.get("email", ""), password, plan=body.get("plan", ""))
     except ValueError as e:
         raise HTTPException(409 if "exists" in str(e) else 400, str(e))
     return {"id": uid, "email": body["email"].strip().lower(), "password": password,
@@ -530,8 +750,26 @@ def api_get_user(ident: str, x_api_key: str | None = Header(None)):
     require_api_key(x_api_key)
     with db.session() as conn:
         u = _api_user(conn, ident)
-    return {"id": u["id"], "email": u["email"], "status": u["status"], "vpn_ip": crypto.client_ip(u["id"]),
+        devices = conn.execute("SELECT id, name, address, last_handshake FROM devices WHERE user_id = ?",
+                               (u["id"],)).fetchall()
+    return {"id": u["id"], "email": u["email"], "status": u["status"], "plan": u["plan"],
+            "plan_source": u["plan_source"], "subscription_status": u["sub_status"],
+            "has_access": billing.has_access(u), "devices": [dict(d) for d in devices],
             "created_at": u["created_at"]}
+
+
+@app.put("/api/v1/users/{ident}/plan")
+async def api_set_plan(ident: str, request: Request, x_api_key: str | None = Header(None)):
+    """Grant/remove a plan without Stripe: {"plan": "basic" | "pro" | ""}."""
+    require_api_key(x_api_key)
+    plan = (await request.json()).get("plan", "")
+    if plan and plan not in billing.PLANS:
+        raise HTTPException(400, f"Unknown plan; use one of {list(billing.PLANS)} or \"\"")
+    with db.session() as conn:
+        u = _api_user(conn, ident)
+        conn.execute("UPDATE users SET plan = ?, plan_source = ? WHERE id = ?",
+                     (plan, "manual" if plan else "", u["id"]))
+    return {"id": u["id"], "plan": plan}
 
 
 @app.post("/api/v1/users/{ident}/{action}")
@@ -627,22 +865,29 @@ async def agent_sync(request: Request, authorization: str | None = Header(None))
             raise HTTPException(401, "Unknown node; re-enroll this server")
         conn.execute("UPDATE nodes SET last_seen = ?, agent_version = ? WHERE id = ?",
                      (now_utc().strftime("%Y-%m-%dT%H:%M:%S"), str(body.get("agent_version", ""))[:20], node["id"]))
-        users = conn.execute("SELECT id, public_key, status FROM users").fetchall()
-        by_key = {u["public_key"]: u["id"] for u in users}
+        now = int(time.time())
+        devices = {d["public_key"]: d for d in conn.execute(
+            "SELECT id, public_key, address, last_handshake, active_since FROM devices")}
         for p in body.get("peers", []):
-            uid = by_key.get(p.get("public_key"))
-            if uid:
-                conn.execute("""
-                    INSERT INTO peer_stats (user_id, node_id, rx_bytes, tx_bytes, last_handshake)
-                    VALUES (?,?,?,?,?)
-                    ON CONFLICT(user_id, node_id) DO UPDATE SET
-                        rx_bytes = excluded.rx_bytes, tx_bytes = excluded.tx_bytes,
-                        last_handshake = excluded.last_handshake""",
-                    (uid, node["id"], int(p.get("rx", 0)), int(p.get("tx", 0)), int(p.get("handshake", 0))))
-    peers = [] if not node["enabled"] else [
-        {"public_key": u["public_key"], "allowed_ips": f"{crypto.client_ip(u['id'])}/32"}
-        for u in users if u["status"] == "active"
-    ]
+            d = devices.get(p.get("public_key"))
+            if not d:
+                continue
+            hs = int(p.get("handshake", 0))
+            conn.execute("""
+                INSERT INTO device_stats (device_id, node_id, rx_bytes, tx_bytes, last_handshake)
+                VALUES (?,?,?,?,?)
+                ON CONFLICT(device_id, node_id) DO UPDATE SET
+                    rx_bytes = excluded.rx_bytes, tx_bytes = excluded.tx_bytes,
+                    last_handshake = excluded.last_handshake""",
+                (d["id"], node["id"], int(p.get("rx", 0)), int(p.get("tx", 0)), hs))
+            if hs > d["last_handshake"]:
+                # a handshake after an idle gap starts a new session
+                new_session = now - d["last_handshake"] >= ACTIVE_WINDOW or not d["active_since"]
+                conn.execute("UPDATE devices SET last_handshake = ?, active_since = ? WHERE id = ?",
+                             (hs, hs if new_session else d["active_since"], d["id"]))
+        allowed = allowed_device_ids(conn) if node["enabled"] else set()
+    peers = [{"public_key": d["public_key"], "allowed_ips": f"{d['address']}/32"}
+             for d in devices.values() if d["id"] in allowed]
     return {"node_id": node["id"], "address": crypto.server_address(),
             "listen_port": node["listen_port"], "peers": peers, "interval": 15}
 

@@ -249,3 +249,33 @@ td form { display: inline; }
   .search input { min-width: 0; }
   .hide-sm { display: none; }
 }
+
+/* ---------- notices */
+.notice { display: flex; gap: 16px; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 16px 20px; font-size: 14px; }
+.notice.warn { background: var(--warn-bg); border-color: color-mix(in srgb, var(--warn) 35%, transparent); color: var(--text); }
+.notice > div { flex: 1 1 320px; }
+.ok-text { color: var(--ok); font-weight: 600; }
+.warn-text { color: var(--warn); font-weight: 600; }
+
+/* ---------- devices */
+.devices li { gap: 14px; padding: 14px 0; }
+.devices .grow { white-space: normal; }
+.device-icon { width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center; flex: none; background: var(--card-2); color: var(--muted); border: 1px solid var(--line); }
+.device-icon.on { background: var(--ok-bg); color: var(--ok); border-color: transparent; }
+.device-pick { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; color: var(--muted); white-space: nowrap; }
+.device-pick[hidden] { display: none; }
+.device-pick select { margin: 0; width: auto; padding: 8px 10px; font-weight: 600; color: var(--text); }
+
+/* ---------- plans */
+.plan-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.pricing-head { text-align: center; margin: 12px 0 30px; }
+.pricing-head h1 { font-size: 32px; }
+.plans { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 340px)); gap: 20px; justify-content: center; }
+.plan { position: relative; display: flex; flex-direction: column; padding: 28px; }
+.plan.featured { border: 2px solid var(--accent); box-shadow: 0 12px 40px color-mix(in srgb, var(--accent) 18%, transparent); }
+.plan .ribbon { top: -11px; left: 50%; transform: translateX(-50%); }
+.plan .price { font-size: 34px; font-weight: 800; letter-spacing: -.02em; margin: 8px 0 2px; min-height: 44px; }
+.devices-big { color: var(--accent); font-weight: 600; }
+.devices-big b { font-size: 18px; }
+.plan .perks { flex: 1; margin-bottom: 4px; }
+.plan form { margin: 0; }

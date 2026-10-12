@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Choose a plan · {{ brand }}{% endblock %}
+{% block page %}pricing{% endblock %}
+
+{% block content %}
+{% if user.status != 'active' %}
+<div class="auth-wrap">
+  <div class="card auth empty">
+    <div class="big">⏸️</div>
+    <h1>Your account is paused</h1>
+    <p class="muted">Your VPN access has been suspended. Please contact support to restore it.</p>
+  </div>
+</div>
+{% else %}
+<div class="pricing-head">
+  <h1>{{ 'Your subscription has ended' if user.sub_status == 'canceled' else 'Choose your plan' }}</h1>
+  <p class="muted">{% if user.sub_status == 'canceled' %}Resubscribe to get your devices back online — your devices and settings are saved.
+    {% else %}Private, fast WireGuard VPN on every location. Cancel anytime.{% endif %}</p>
+</div>
+
+<div class="plans">
+  {% for key, p in plans.items() %}
+  <div class="card plan{{ ' featured' if key == 'pro' }}">
+    {% if key == 'pro' %}<span class="ribbon">Best value</span>{% endif %}
+    <h2>{{ p.name }}</h2>
+    <div class="price">{{ price_labels[key] or '&nbsp;'|safe }}</div>
+    <div class="devices-big"><b>{{ p.devices }}</b> device{{ 's' if p.devices != 1 }} at a time</div>
+    <ul class="perks">
+      <li>{% if p.devices == 1 %}Use it on one device at a time{% else %}Phone, laptop, tablet &amp; more — all at once{% endif %}</li>
+      <li>Every server location</li>
+      <li>Unlimited bandwidth</li>
+      <li>Fast, modern WireGuard® encryption</li>
+      <li>iPhone, Android, Windows, Mac &amp; Linux</li>
+    </ul>
+    {% if billing_enabled and p.price_id %}
+    <form method="post" action="/billing/checkout">
+      <input type="hidden" name="plan" value="{{ key }}">
+      <button class="btn block {{ 'primary' if key == 'pro' }}">Get {{ p.name }}</button>
+    </form>
+    {% else %}
+    <button class="btn block" disabled>Coming soon</button>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+
+<p class="muted small" style="text-align:center;margin-top:22px">
+  Secure checkout by Stripe. Switch plans or cancel anytime from your account.
+  {% if not billing_enabled and user.is_admin %}<br><b>Admin:</b> set <code>STRIPE_SECRET_KEY</code>, <code>STRIPE_PRICE_BASIC</code> and <code>STRIPE_PRICE_PRO</code> to enable checkout.{% endif %}
+</p>
+{% endif %}
+{% endblock %}
