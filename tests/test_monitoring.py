@@ -71,7 +71,7 @@ def test_destination_flows_are_attributed_to_customers(client):
     dev = customer_with_device(client)
     now = int(time.time())
     resp = post_sync(client, secret, flows=[
-        {"src": dev["address"], "dst": "93.184.216.34", "dport": 443, "proto": "tcp", "first": now, "last": now,
+        {"src": "10.64" + dev["address"][5:], "dst": "93.184.216.34", "dport": 443, "proto": "tcp", "first": now, "last": now,
          "conns": 3, "out": 1200, "in": 48000},
         {"src": "10.66.9.9", "dst": "1.1.1.1", "dport": 53, "proto": "udp", "first": now, "last": now,
          "conns": 1, "out": 60, "in": 120}])

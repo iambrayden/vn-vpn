@@ -54,7 +54,7 @@ def test_granted_plan_unlocks_portal_and_creates_first_device(client):
     secret = add_node(client)
     assert sync(client, secret) == {dev["public_key"]}
     conf = client.get(f"/portal/config/1.conf?device={dev['id']}").text
-    assert f"Address = {dev['address']}/32" in conf and dev["private_key"] in conf
+    assert "Address = 10.64.0.2/32" in conf and dev["private_key"] in conf  # first server's range
 
 
 def test_cannot_download_someone_elses_device(client):

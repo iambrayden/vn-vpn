@@ -34,7 +34,7 @@ def test_client_config_is_ipv4_with_safe_mtu(client):
 def test_sync_tells_agent_mtu_subnet_and_version(client):
     secret = add_node(client)
     r = client.post("/api/agent/sync", json={"peers": []}, headers={"Authorization": f"Bearer {secret}"}).json()
-    assert r["mtu"] == crypto.WG_MTU and r["subnet"] == str(crypto.VPN_SUBNET)
+    assert r["mtu"] == crypto.WG_MTU and r["subnet"] == "10.64.0.0/16" and r["address"] == "10.64.0.1/16"
     assert r["agent_version"] == agent.VERSION and r["endpoint"] == "1.2.3.4"
 
 
@@ -215,3 +215,51 @@ def test_agent_skips_private_interface_ip_and_asks_outside(monkeypatch):
         def __exit__(self, *a): pass
     monkeypatch.setattr(agent.urllib.request, "urlopen", lambda req, timeout=0: Resp(b"66.42.100.7\n"))
     assert agent.detect_public_ipv4() == "66.42.100.7"
+
+
+def test_each_location_gives_a_device_a_different_tunnel_address(client):
+    """WireGuard apps refuse tunnels with overlapping addresses ("Tunnel address overlaps with network ...")."""
+    chi, stl = add_node(client, "CHI1", "US"), add_node(client, "STL1", "US")
+    signup(client)
+    grant("cust@example.com", "pro")
+    client.get("/portal")
+    client.post("/portal/devices", data={"name": "Laptop"})
+    phone, laptop = devices_of("cust@example.com")
+    addrs = {}
+    for dev in (phone, laptop):
+        for node in (1, 2):
+            conf = client.get(f"/portal/config/{node}.conf?device={dev['id']}").text
+            addrs[(dev["id"], node)] = conf.split("Address = ")[1].split("/")[0]
+    assert len(set(addrs.values())) == 4                              # no overlaps anywhere
+    assert addrs[(phone["id"], 1)].startswith("10.64.") and addrs[(phone["id"], 2)].startswith("10.65.")
+    # each server accepts exactly the addresses its configs use
+    r1 = client.post("/api/agent/sync", json={"peers": []}, headers={"Authorization": f"Bearer {chi}"}).json()
+    r2 = client.post("/api/agent/sync", json={"peers": []}, headers={"Authorization": f"Bearer {stl}"}).json()
+    assert (r1["address"], r2["address"]) == ("10.64.0.1/16", "10.65.0.1/16")
+    assert {p["allowed_ips"] for p in r1["peers"]} == {f"{addrs[(d['id'], 1)]}/32" for d in (phone, laptop)}
+    assert {p["allowed_ips"] for p in r2["peers"]} == {f"{addrs[(d['id'], 2)]}/32" for d in (phone, laptop)}
+
+
+def test_existing_servers_get_their_own_range_on_upgrade(client):
+    add_node(client, "A")
+    add_node(client, "B")
+    with db.session() as conn:
+        conn.execute("DROP INDEX nodes_slot")
+        conn.execute("UPDATE nodes SET slot = NULL")
+    db.init()
+    with db.session() as conn:
+        assert sorted(r[0] for r in conn.execute("SELECT slot FROM nodes")) == [0, 1]
+    # and a server added later takes the next free range
+    add_node(client, "C")
+    with db.session() as conn:
+        assert conn.execute("SELECT slot FROM nodes WHERE name = 'C'").fetchone()[0] == 2
+
+
+def test_server_ranges_are_reused_after_removal(client):
+    add_node(client, "A")
+    add_node(client, "B")
+    with db.session() as conn:
+        conn.execute("DELETE FROM nodes WHERE name = 'A'")
+    add_node(client, "C")
+    with db.session() as conn:
+        assert conn.execute("SELECT slot FROM nodes WHERE name = 'C'").fetchone()[0] == 0

@@ -10,9 +10,13 @@ import secrets
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
-# Every node runs the same tunnel subnet; each device gets one address that is valid on every node,
-# so no per-node IP allocation is needed.
+# Device "identity" addresses are allocated in VPN_SUBNET; only their host part (low 16 bits) matters.
 VPN_SUBNET = ipaddress.ip_network(os.environ.get("VPN_SUBNET", "10.66.0.0/16"))
+# Each server gets its own /16 out of this pool (slot 0 = 10.64.0.0/16, slot 1 = 10.65.0.0/16, ...), and a
+# device's address on a server is that server's /16 + the device's host part. Tunnels for different
+# locations therefore never overlap on the client - WireGuard apps refuse overlapping tunnel addresses.
+VPN_POOL = ipaddress.ip_network(os.environ.get("VPN_POOL", "10.64.0.0/10"))
+MAX_NODES = VPN_POOL.num_addresses // 65536
 CLIENT_DNS = os.environ.get("CLIENT_DNS", "1.1.1.1, 1.0.0.1")
 # 1380 instead of WireGuard's 1420 default: leaves headroom for PPPoE, mobile and other tunnels, which
 # otherwise show up as "connected but pages hang". Used for both clients and servers.
@@ -47,9 +51,30 @@ def wg_keypair() -> tuple[str, str]:
     return base64.b64encode(priv).decode(), base64.b64encode(pub).decode()
 
 
-def server_address() -> str:
-    """Address (with prefix) of the wg interface on every node."""
-    return f"{VPN_SUBNET.network_address + 1}/{VPN_SUBNET.prefixlen}"
+def node_subnet(slot: int) -> ipaddress.IPv4Network:
+    if not 0 <= slot < MAX_NODES:
+        raise ValueError(f"server slot {slot} outside VPN_POOL ({MAX_NODES} servers max)")
+    return ipaddress.ip_network((int(VPN_POOL.network_address) + slot * 65536, 16))
+
+
+def server_address(slot: int) -> str:
+    """Address (with prefix) of a server's wg interface."""
+    net = node_subnet(slot)
+    return f"{net.network_address + 1}/{net.prefixlen}"
+
+
+def device_ip(device, node) -> str:
+    """A device's tunnel address on a given server: the server's /16 + the device's host part."""
+    host = int(ipaddress.ip_address(device["address"])) & 0xFFFF
+    return str(node_subnet(node["slot"]).network_address + host)
+
+
+def allocate_slot(conn) -> int:
+    used = {r[0] for r in conn.execute("SELECT slot FROM nodes WHERE slot IS NOT NULL")}
+    slot = next((s for s in range(MAX_NODES) if s not in used), None)
+    if slot is None:
+        raise ValueError(f"all {MAX_NODES} server address ranges are in use; widen VPN_POOL")
+    return slot
 
 
 def client_ip(offset: int) -> str:
@@ -104,7 +129,7 @@ def client_config(device, node, email: str) -> str:
         "[Interface]\n"
         f"# {node['name']} ({node['location']}) - {device['name']} - {email}\n"
         f"PrivateKey = {device['private_key']}\n"
-        f"Address = {device['address']}/32\n"
+        f"Address = {device_ip(device, node)}/32\n"
         f"DNS = {CLIENT_DNS}\n"
         f"MTU = {WG_MTU}\n"
         "\n"

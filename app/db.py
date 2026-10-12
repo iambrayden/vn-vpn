@@ -188,6 +188,7 @@ MIGRATIONS = [
     ("nodes", "agent_error", "TEXT NOT NULL DEFAULT ''"),          # last problem the agent reported
     ("enroll_tokens", "node_id", "INTEGER"),                        # set = one-time re-enroll for that server
     ("enroll_tokens", "expires_at", "INTEGER"),                     # unix time; NULL = never
+    ("nodes", "slot", "INTEGER"),                                   # which /16 of VPN_POOL the server uses
 ]
 
 
@@ -200,6 +201,12 @@ def init():
             if column not in cols:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         _migrate_user_keys_to_devices(conn)
+        # give every server its own address range (servers registered before per-server ranges existed)
+        for i, n in enumerate(conn.execute("SELECT id FROM nodes WHERE slot IS NULL ORDER BY id").fetchall()):
+            used = {r[0] for r in conn.execute("SELECT slot FROM nodes WHERE slot IS NOT NULL")}
+            conn.execute("UPDATE nodes SET slot = ? WHERE id = ?",
+                         (next(s for s in range(1 << 16) if s not in used), n["id"]))
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS nodes_slot ON nodes (slot)")
 
 
 def _migrate_user_keys_to_devices(conn):

@@ -1100,6 +1100,13 @@ def agent_whoami(request: Request):
     return {"ip": client_ip_of(request)}
 
 
+def _new_slot(conn) -> int:
+    try:
+        return crypto.allocate_slot(conn)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+
 @app.post("/api/agent/register")
 def agent_register(request: Request, body: dict = Depends(json_body)):
     token = body.get("token", "")
@@ -1149,13 +1156,15 @@ def agent_register(request: Request, body: dict = Depends(json_body)):
         else:
             cur = conn.execute(
                 "INSERT INTO nodes (name, location, country, endpoint_host, listen_port, public_key, secret_hash, "
-                "hostname) VALUES (?,?,?,?,?,?,?,?)",
+                "hostname, slot) VALUES (?,?,?,?,?,?,?,?,?)",
                 (str(body.get("name") or hostname or endpoint)[:100], str(body.get("location", ""))[:100],
                  countries.normalize(body.get("country")) or countries.normalize(body.get("location")),
-                 endpoint, int(body.get("listen_port", 51820)), public_key, crypto.sha256(secret), hostname))
+                 endpoint, int(body.get("listen_port", 51820)), public_key, crypto.sha256(secret), hostname,
+                 _new_slot(conn)))
             node_id = cur.lastrowid
         conn.execute("UPDATE enroll_tokens SET uses = uses + 1 WHERE token = ?", (token,))
-    return {"node_id": node_id, "secret": secret, "address": crypto.server_address()}
+        slot = conn.execute("SELECT slot FROM nodes WHERE id = ?", (node_id,)).fetchone()[0]
+    return {"node_id": node_id, "secret": secret, "address": crypto.server_address(slot)}
 
 
 @app.post("/api/agent/sync")
@@ -1231,15 +1240,17 @@ def agent_sync(request: Request, body: dict = Depends(json_body), authorization:
             if isinstance(body.get("metrics"), dict):
                 monitoring.record_metrics(conn, node["id"], body["metrics"])
             if isinstance(body.get("flows"), list):
-                monitoring.record_flows(conn, node, body["flows"], {d["address"]: d for d in devices.values()})
+                monitoring.record_flows(conn, node, body["flows"],
+                                        {crypto.device_ip(d, node): d for d in devices.values()})
     except Exception:
         log.exception("node %s: recording stats/logs failed (check-in still accepted)", node["id"])
 
     with db.session() as conn:
         allowed = allowed_device_ids(conn) if node["enabled"] else set()
-    peers = [{"public_key": d["public_key"], "allowed_ips": f"{d['address']}/32"}
+    peers = [{"public_key": d["public_key"], "allowed_ips": f"{crypto.device_ip(d, node)}/32"}
              for d in devices.values() if d["id"] in allowed]
-    return {"node_id": node["id"], "address": crypto.server_address(), "subnet": str(crypto.VPN_SUBNET),
+    return {"node_id": node["id"], "address": crypto.server_address(node["slot"]),
+            "subnet": str(crypto.node_subnet(node["slot"])),
             "mtu": crypto.WG_MTU, "endpoint": node["endpoint_host"], "listen_port": node["listen_port"],
             "peers": peers, "interval": 15, "agent_version": AGENT_VERSION,
             "flow_logging": monitoring.LOG_DESTINATIONS}
