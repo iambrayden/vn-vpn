@@ -25,7 +25,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 CONF_DIR = os.environ.get("VNVPN_DIR", "/etc/vnvpn")
 CONF_FILE = os.path.join(CONF_DIR, "agent.json")
 KEY_FILE = os.path.join(CONF_DIR, "private.key")
@@ -255,22 +255,68 @@ def parse_conntrack(line):
 
 # --------------------------------------------------------------------------- DNS names for destinations
 
-# Classic BPF, run in the kernel: accept only IPv4, UDP, unfragmented, source port 53 (DNS answers).
+# Classic BPF, run in the kernel: accept only (a) DNS answers going to clients (UDP source port 53) and
+# (b) the first packet of a TLS handshake from a client (TCP to port 443 whose payload starts with a ClientHello),
+# which names the website even when the device uses encrypted DNS. Everything else never reaches Python.
 # On wg0 (no link layer) packets start at the IP header.
+_DROP, _ACCEPT = 23, 22
 _DNS_BPF = [
-    (0x30, 0, 0, 0),        # ldb [0]
-    (0x54, 0, 0, 0xF0),     # and #0xf0
-    (0x15, 0, 8, 0x40),     # jeq #0x40 (IPv4)        else drop
-    (0x30, 0, 0, 9),        # ldb [9]
-    (0x15, 0, 6, 17),       # jeq #17 (UDP)           else drop
-    (0x28, 0, 0, 6),        # ldh [6]
-    (0x45, 4, 0, 0x1FFF),   # jset #0x1fff (fragment) -> drop
-    (0xB1, 0, 0, 0),        # ldxb 4*([0]&0xf)  (IP header length)
-    (0x48, 0, 0, 0),        # ldh [x+0]  (UDP source port)
-    (0x15, 0, 1, 53),       # jeq #53                 else drop
-    (0x06, 0, 0, 0xFFFF),   # accept
-    (0x06, 0, 0, 0),        # drop
+    (0x30, 0, 0, 0),            # 0  ldb [0]
+    (0x54, 0, 0, 0xF0),         # 1  and #0xf0
+    (0x15, 0, _DROP - 3, 0x40), # 2  jeq #0x40 (IPv4)           else drop
+    (0x28, 0, 0, 6),            # 3  ldh [6]
+    (0x45, _DROP - 5, 0, 0x1FFF),  # 4  jset #0x1fff (fragment)  -> drop
+    (0xB1, 0, 0, 0),            # 5  ldxb 4*([0]&0xf)   X = IP header length
+    (0x30, 0, 0, 9),            # 6  ldb [9]  (protocol)
+    (0x15, 0, 2, 17),           # 7  jeq #17 (UDP)              else -> 10
+    (0x48, 0, 0, 0),            # 8  ldh [x+0]  (UDP source port)
+    (0x15, _ACCEPT - 10, _DROP - 10, 53),  # 9  jeq #53 -> accept, else drop
+    (0x15, 0, _DROP - 11, 6),   # 10 jeq #6 (TCP)               else drop
+    (0x48, 0, 0, 2),            # 11 ldh [x+2]  (TCP destination port)
+    (0x15, 0, _DROP - 13, 443), # 12 jeq #443                   else drop
+    (0x50, 0, 0, 12),           # 13 ldb [x+12] (TCP data offset)
+    (0x54, 0, 0, 0xF0),         # 14 and #0xf0
+    (0x74, 0, 0, 2),            # 15 rsh #2      A = TCP header length
+    (0x0C, 0, 0, 0),            # 16 add x       A = IP + TCP header length
+    (0x07, 0, 0, 0),            # 17 tax
+    (0x50, 0, 0, 0),            # 18 ldb [x+0]  (TLS record type)
+    (0x15, 0, _DROP - 20, 0x16),   # 19 jeq #0x16 (handshake)  else drop
+    (0x50, 0, 0, 5),            # 20 ldb [x+5]  (handshake type)
+    (0x15, 0, _DROP - 22, 1),   # 21 jeq #1 (ClientHello)       else drop
+    (0x06, 0, 0, 0xFFFF),       # 22 accept
+    (0x06, 0, 0, 0),            # 23 drop
 ]
+
+
+def parse_client_hello(packet):
+    """IPv4/TCP packet carrying a TLS ClientHello -> (client_ip, server_ip, server_name) or None.
+    Big ClientHellos span two packets; we only see the first, so the name is found when it's in there."""
+    try:
+        ihl = (packet[0] & 0x0F) * 4
+        client, server = _socket_ntoa(packet[12:16]), _socket_ntoa(packet[16:20])
+        tls = packet[ihl + ((packet[ihl + 12] >> 4) * 4):]
+        if tls[0] != 0x16 or tls[5] != 1:
+            return None
+        off = 9 + 2 + 32                                  # record + handshake headers, version, random
+        off += 1 + tls[off]                               # session id
+        off += 2 + struct.unpack("!H", tls[off:off + 2])[0]   # cipher suites
+        off += 1 + tls[off]                               # compression methods
+        end = min(len(tls), off + 2 + struct.unpack("!H", tls[off:off + 2])[0])
+        off += 2
+        while off + 4 <= end:
+            etype, elen = struct.unpack("!HH", tls[off:off + 4])
+            off += 4
+            if etype == 0:                                # server_name
+                nlen = struct.unpack("!H", tls[off + 3:off + 5])[0]
+                name = tls[off + 5:off + 5 + nlen]
+                if tls[off + 2] != 0 or len(name) != nlen:
+                    return None
+                name = name.decode("ascii").lower().rstrip(".")
+                return (client, server, name) if "." in name else None
+            off += elen
+    except (IndexError, struct.error, UnicodeDecodeError):
+        pass
+    return None
 
 
 class _SockFilter(ctypes.Structure):
@@ -355,7 +401,7 @@ class DnsWatcher:
             return False
         self.sock, self.running = s, True
         threading.Thread(target=self._read, daemon=True).start()
-        log(f"watching DNS answers on {self.iface}")
+        log(f"learning website names from DNS answers and TLS handshakes on {self.iface}")
         return True
 
     def stop(self):
@@ -378,7 +424,10 @@ class DnsWatcher:
                 except OSError:
                     pass
                 continue
-            self.add(parse_dns_answer(pkt))
+            if len(pkt) > 20 and pkt[9] == 6:
+                self.add_sni(parse_client_hello(pkt))
+            else:
+                self.add(parse_dns_answer(pkt))
 
     def add(self, ans):
         if not ans:
@@ -391,6 +440,13 @@ class DnsWatcher:
                 self.names = {k: v for k, v in self.names.items() if v[1] > now}
             for ip, ttl in ips:
                 self.names[(client, ip)] = (name, now + max(ttl, 300))
+
+    def add_sni(self, hello):
+        if not hello:
+            return
+        client, server, name = hello
+        with self.lock:
+            self.names[(client, server)] = (name, time.time() + 3600)
 
     def lookup(self, client, ip):
         v = self.names.get((client, ip))
@@ -473,6 +529,10 @@ class FlowCollector:
     def drain(self):
         with self.lock:
             flows, self.flows = list(self.flows.values()), {}
+            if self.dns:
+                for f in flows:
+                    if not f.get("host"):
+                        f["host"] = self.dns.lookup(f["src"], f["dst"])
             if self.dropped:
                 log(f"flow log: dropped {self.dropped} flows over the {self.MAX_KEYS} per-interval cap")
                 self.dropped = 0

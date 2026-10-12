@@ -158,6 +158,22 @@ CREATE TABLE IF NOT EXISTS dns_log (
 );
 CREATE INDEX IF NOT EXISTS dns_log_ts ON dns_log (ts);
 
+-- Hourly totals of flow_log / dns_log, kept much longer (INSIGHTS_DAYS) for the 30-day and all-time views.
+CREATE TABLE IF NOT EXISTS flow_rollup (
+    last_seen   INTEGER NOT NULL,             -- start of the hour
+    node_id     INTEGER, device_id INTEGER,
+    user_email  TEXT NOT NULL, device_name TEXT NOT NULL, node_name TEXT NOT NULL,
+    src TEXT NOT NULL, dst TEXT NOT NULL, host TEXT NOT NULL, dport INTEGER NOT NULL, proto TEXT NOT NULL,
+    app TEXT NOT NULL, category TEXT NOT NULL, country TEXT NOT NULL, org TEXT NOT NULL,
+    conns INTEGER NOT NULL, bytes_in INTEGER NOT NULL, bytes_out INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS flow_rollup_ts ON flow_rollup (last_seen);
+CREATE TABLE IF NOT EXISTS dns_rollup (
+    ts INTEGER NOT NULL, node_id INTEGER, device_id INTEGER, user_email TEXT NOT NULL, device_name TEXT NOT NULL,
+    name TEXT NOT NULL, app TEXT NOT NULL, category TEXT NOT NULL, count INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS dns_rollup_ts ON dns_rollup (ts);
+
 CREATE TABLE IF NOT EXISTS stripe_events (
     id         TEXT PRIMARY KEY,
     type       TEXT NOT NULL,

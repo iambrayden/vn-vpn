@@ -4,6 +4,8 @@
 
 {% macro node_status(n) %}<span class="pill {{ 'on' if n.online else 'off' }}" data-node-status="{{ n.id }}"><span class="dot{{ ' live' if n.online }}"></span>{{ 'Online' if n.online else 'Offline' }}</span>{% endmacro %}
 
+{% block scripts %}<script src="/static/insights.js?v={{ asset_v['insights.js'] }}"></script>{% endblock %}
+
 {% block content %}
 {% set online = nodes|selectattr('online')|list %}
 <div class="section-head" style="margin-top:0">
@@ -33,7 +35,12 @@
   <button data-tab="overview" role="tab">Overview</button>
   <button data-tab="servers" role="tab">Servers <span class="count">{{ nodes|length }}</span></button>
   <button data-tab="users" role="tab">Users <span class="count">{{ users|length }}</span></button>
-  <a class="tab tab-link" href="/admin/insights">Traffic insights →</a>
+  <button data-tab="insights" role="tab">Insights</button>
+</div>
+
+<!-- ============================================================ traffic insights -->
+<div data-panel="insights" hidden>
+{% include "_insights.html" %}
 </div>
 
 <!-- ============================================================ overview -->

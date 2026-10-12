@@ -94,10 +94,12 @@
       if (!$(`[data-panel="${name}"]`)) name = $('[data-tab]', tabs).dataset.tab;
       $$('[data-tab]', tabs).forEach(b => b.classList.toggle('active', b.dataset.tab === name));
       $$('[data-panel]').forEach(p => (p.hidden = p.dataset.panel !== name));
+      document.body.classList.toggle('wide', name === 'insights');  // the insights dashboard uses the full width
+      document.dispatchEvent(new CustomEvent('tab-shown', { detail: name }));
     };
     tabs.addEventListener('click', e => {
       const b = e.target.closest('[data-tab]');
-      if (b) { history.replaceState(null, '', '#' + b.dataset.tab); show(b.dataset.tab); }
+      if (b) { history.replaceState(null, '', location.pathname + (b.dataset.tab === 'insights' ? location.search : '') + '#' + b.dataset.tab); show(b.dataset.tab); }
     });
     const fromHash = () => show(location.hash.slice(1).split('/')[0]);
     window.addEventListener('hashchange', fromHash); fromHash();

@@ -102,7 +102,10 @@ def test_flows_are_enriched_and_dashboard_aggregates(client, use_geo):
         assert [r["name"] for r in conn.execute("SELECT name FROM dns_log")] == ["rr1.googlevideo.com"]
 
     login_admin(client)
-    assert "Traffic insights" in client.get("/admin/insights").text
+    admin_page = client.get("/admin").text
+    assert 'data-tab="insights"' in admin_page and 'id="insights-root"' in admin_page
+    r = client.get("/admin/insights?app=Netflix", follow_redirects=False)   # old link -> the tab
+    assert r.status_code == 303 and r.headers["location"] == "/admin?app=Netflix#insights"
     d = client.get("/admin/insights/data.json?range=1h").json()
     assert d["kpi"]["down"] == 94120 and d["kpi"]["clients"] == 2 and d["kpi"]["dns"] == 3
     assert d["kpi"]["top_app"] == "YouTube"
@@ -135,6 +138,7 @@ def test_insights_are_admin_only(client):
     signup(client)
     for path in ("/admin/insights", "/admin/insights/data.json", "/admin/insights/live.json"):
         assert client.get(path).status_code == 403
+    assert client.post("/admin/insights/geo").status_code == 403
 
 
 IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile Safari/604.1"
@@ -171,3 +175,92 @@ def test_config_file_name_is_the_tunnel_name(client):
              {"id": 12, "name": "B", "location": "Chicago", "country": "US"},
              {"id": 3, "name": "Frankfurt am Main Süd", "location": "", "country": "DE"}]
     assert main.tunnel_names(nodes) == {1: "US-Chicago", 12: "US-Chicago-12", 3: "DE-Frankfurt-am"}
+
+
+def hello_packet(client, server, sni, pad_before=0):
+    """IPv4/TCP packet with a TLS 1.3-style ClientHello carrying an SNI extension."""
+    name = sni.encode()
+    sni_ext = struct.pack("!HHHBH", 0, len(name) + 5, len(name) + 3, 0, len(name)) + name
+    exts = struct.pack("!HH", 0x0a0a, pad_before) + b"\0" * pad_before + sni_ext   # GREASE ext first
+    body = b"\x03\x03" + b"\x11" * 32 + b"\x00" + struct.pack("!H", 4) + b"\x13\x01\x13\x02" + b"\x01\x00"
+    body += struct.pack("!H", len(exts)) + exts
+    hs = b"\x01" + len(body).to_bytes(3, "big") + body
+    tls = b"\x16\x03\x01" + struct.pack("!H", len(hs)) + hs
+    tcp = struct.pack("!HHIIBBHHH", 50000, 443, 1, 0, 5 << 4, 0x18, 65535, 0, 0) + tls
+    ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(tcp), 0, 0, 64, 6, 0,
+                     bytes(int(x) for x in client.split(".")), bytes(int(x) for x in server.split(".")))
+    return ip + tcp
+
+
+def test_agent_learns_names_from_tls_handshakes():
+    pkt = hello_packet("10.64.0.2", "142.250.80.46", "www.YouTube.com", pad_before=20)
+    assert agent.parse_client_hello(pkt) == ("10.64.0.2", "142.250.80.46", "www.youtube.com")
+    assert agent.parse_client_hello(pkt[:80]) is None                      # name in the part we didn't see
+    assert agent.parse_client_hello(hello_packet("10.64.0.2", "1.1.1.1", "localhost")) is None
+    w = agent.DnsWatcher("wg0")
+    fc = agent.FlowCollector("10.64.0.0/16", w)
+    fc.add(("NEW", "tcp", "10.64.0.2", "142.250.80.46", 443, 0, 0))       # connection starts before the hello
+    w.add_sni(agent.parse_client_hello(pkt))
+    assert fc.drain()[0]["host"] == "www.youtube.com"
+
+
+def test_mirror_database_and_backfill_of_unknowns(client, tmp_path, monkeypatch):
+    secret = add_node(client)
+    now = int(time.time())
+    post_sync(client, secret, flows=[{"src": "10.64.9.9", "dst": "31.13.70.5", "dport": 443, "proto": "tcp",
+                                      "first": now, "last": now, "conns": 1, "out": 1, "in": 2}])
+    with db.session() as conn:
+        assert conn.execute("SELECT app, country FROM flow_log").fetchone()[:] == ("", "")   # no database yet
+    monkeypatch.setattr(geo, "ENABLED", True)
+    monkeypatch.setattr(geo, "_path", lambda: str(tmp_path / "geo.db"))
+    assert geo.status()["ranges"] == 0
+    asn = ['start_ip,end_ip,asn,org\n', '31.13.64.0,31.13.127.255,32934,"Facebook, Inc."\n']
+    country = ["31.13.64.0,31.13.127.255,IE\n"]
+    assert geo.import_csv(asn, country) == 1
+    assert geo.lookup("31.13.70.5") == ("IE", "FACEBOOK, INC.")
+    assert geo.backfill() == 1
+    with db.session() as conn:
+        assert conn.execute("SELECT app, country FROM flow_log").fetchone()[:] == ("Facebook", "IE")
+    st = geo.status()
+    assert st["ranges"] == 1 and st["source"] == "ip-location-db"
+    geo.lookup.cache_clear()
+
+
+def test_geo_download_failure_is_shown_with_retry(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(geo, "ENABLED", True)
+    monkeypatch.setattr(geo, "_path", lambda: str(tmp_path / "geo.db"))
+    monkeypatch.setattr(geo, "_get", lambda url: (_ for _ in ()).throw(OSError("blocked")))
+    geo.refresh_if_stale(force=True)
+    assert "iptoasn.com: blocked" in geo.state["error"] and "jsDelivr mirror: blocked" in geo.state["error"]
+    login_admin(client)
+    page = client.get("/admin").text
+    assert "IP owner database isn" in page and "jsDelivr mirror: blocked" in page and "/admin/insights/geo" in page
+    geo.state["error"] = ""
+
+
+def test_hourly_totals_power_30_day_and_all_time(client):
+    from app import insights
+    secret = add_node(client)
+    now = int(time.time())
+    old = now - 20 * 86400
+    post_sync(client, secret, flows=[
+        {"src": "10.64.9.9", "dst": "1.0.0.1", "dport": 443, "proto": "tcp", "first": old, "last": old,
+         "conns": 2, "out": 10, "in": 1000, "host": "www.netflix.com"},
+        {"src": "10.64.9.9", "dst": "1.0.0.1", "dport": 443, "proto": "tcp", "first": old + 60, "last": old + 60,
+         "conns": 1, "out": 5, "in": 500, "host": "www.netflix.com"},
+        {"src": "10.64.9.9", "dst": "1.0.0.2", "dport": 443, "proto": "tcp", "first": now, "last": now,
+         "conns": 1, "out": 1, "in": 7, "host": "www.google.com"}],
+        dns=[{"src": "10.64.9.9", "name": "www.google.com", "count": 2}])
+    with db.session() as conn:
+        insights.rollup(conn)
+        assert conn.execute("SELECT COUNT(*), SUM(bytes_in) FROM flow_rollup").fetchone()[:] == (1, 1500)
+        insights.rollup(conn)                                                 # idempotent
+        assert conn.execute("SELECT COUNT(*) FROM flow_rollup").fetchone()[0] == 1
+        conn.execute("DELETE FROM flow_log WHERE last_seen < ?", (now - 7 * 86400,))   # raw log expired
+    login_admin(client)
+    for rng in ("30d", "all"):
+        d = client.get(f"/admin/insights/data.json?range={rng}").json()
+        assert d["kpi"]["down"] == 1507 and d["kpi"]["dns"] == 2, rng       # hourly totals + this hour
+        assert d["apps"][0]["name"] == "Netflix"
+    assert client.get("/admin/insights/data.json?range=7d").json()["kpi"]["down"] == 7
+    assert client.get("/admin/insights/data.json?range=all").json()["bucket"] <= 86400

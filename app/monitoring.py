@@ -7,9 +7,10 @@ import threading
 import time
 import urllib.request
 
-from . import apps, db, geo
+from . import apps, db, geo, insights
 
-METRICS_DAYS = int(os.environ.get("METRICS_DAYS", "7"))
+METRICS_DAYS = int(os.environ.get("METRICS_DAYS", "30"))
+INSIGHTS_DAYS = int(os.environ.get("INSIGHTS_DAYS", "365"))  # hourly traffic totals (30-day / all-time views)
 SESSION_LOG_DAYS = int(os.environ.get("SESSION_LOG_DAYS", "30"))
 FLOW_LOG_DAYS = int(os.environ.get("FLOW_LOG_DAYS", "7"))
 LOG_SESSIONS = os.environ.get("LOG_SESSIONS", "true").lower() in ("1", "true", "yes")
@@ -141,6 +142,8 @@ def purge(conn):
     conn.execute("DELETE FROM sessions WHERE last_seen < ?", (now - SESSION_LOG_DAYS * 86400,))
     conn.execute("DELETE FROM flow_log WHERE last_seen < ?", (now - FLOW_LOG_DAYS * 86400,))
     conn.execute("DELETE FROM dns_log WHERE ts < ?", (now - FLOW_LOG_DAYS * 86400,))
+    conn.execute("DELETE FROM flow_rollup WHERE last_seen < ?", (now - INSIGHTS_DAYS * 86400,))
+    conn.execute("DELETE FROM dns_rollup WHERE ts < ?", (now - INSIGHTS_DAYS * 86400,))
 
 
 def send_alert(text: str):
@@ -189,6 +192,7 @@ def check_alerts(conn, node_online) -> list[str]:
 def _tick(node_online, do_purge: bool):
     with db.session() as conn:
         messages = check_alerts(conn, node_online)
+        insights.rollup(conn)
         if do_purge:
             purge(conn)
     for msg in messages:

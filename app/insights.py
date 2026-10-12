@@ -3,7 +3,53 @@ import time
 
 from . import apps
 
-RANGES = {"1h": (3600, 120), "24h": (86400, 1800), "7d": (7 * 86400, 4 * 3600)}  # span, bucket seconds
+RANGES = {"1h": (3600, 120), "24h": (86400, 1800), "7d": (7 * 86400, 4 * 3600), "30d": (30 * 86400, 12 * 3600),
+          "all": (None, None)}  # span, bucket seconds (all: from the oldest hourly total)
+HOUR = 3600
+FLOW_COLS = ("last_seen, node_id, device_id, user_email, device_name, node_name, src, dst, host, dport, proto, app, "
+             "category, country, org, conns, bytes_in, bytes_out")
+DNS_COLS = "ts, node_id, device_id, user_email, device_name, name, app, category, count"
+
+
+def rollup(conn):
+    """Fold finished hours of flow_log / dns_log into the hourly tables (cheap: runs every 30s, works once an hour)."""
+    done = conn.execute("SELECT value FROM meta WHERE key = 'rollup_until'").fetchone()
+    until = (int(time.time()) - 120) // HOUR * HOUR  # 2 min grace for check-ins straddling the hour
+    start = int(done[0]) if done else (conn.execute("SELECT MIN(last_seen) FROM flow_log").fetchone()[0] or until)
+    start = start // HOUR * HOUR
+    if start >= until:
+        return
+    conn.execute(f"""INSERT INTO flow_rollup ({FLOW_COLS})
+        SELECT (last_seen / {HOUR}) * {HOUR}, node_id, device_id, MAX(user_email), MAX(device_name), MAX(node_name),
+               src, dst, host, dport, proto, MAX(app), MAX(category), MAX(country), MAX(org),
+               SUM(conns), SUM(bytes_in), SUM(bytes_out)
+        FROM flow_log WHERE last_seen >= ? AND last_seen < ?
+        GROUP BY 1, node_id, device_id, src, dst, host, dport, proto""", (start, until))
+    conn.execute(f"""INSERT INTO dns_rollup ({DNS_COLS})
+        SELECT (ts / {HOUR}) * {HOUR}, node_id, device_id, MAX(user_email), MAX(device_name), name, MAX(app),
+               MAX(category), SUM(count)
+        FROM dns_log WHERE ts >= ? AND ts < ? GROUP BY 1, node_id, device_id, name""", (start, until))
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('rollup_until', ?)", (str(until),))
+
+
+def _sources(conn, since: int):
+    """Tables to read: detailed logs for short ranges; hourly totals + the unfinished hours for long ones."""
+    if since >= time.time() - 2 * 86400:
+        return "flow_log", "dns_log"
+    done = conn.execute("SELECT value FROM meta WHERE key = 'rollup_until'").fetchone()
+    cut = int(done[0]) if done else 0
+    return (f"(SELECT {FLOW_COLS} FROM flow_rollup WHERE last_seen < {cut} "
+            f"UNION ALL SELECT {FLOW_COLS} FROM flow_log WHERE last_seen >= {cut})",
+            f"(SELECT {DNS_COLS} FROM dns_rollup WHERE ts < {cut} "
+            f"UNION ALL SELECT {DNS_COLS} FROM dns_log WHERE ts >= {cut})")
+
+
+def _all_time(conn, now: int) -> tuple[int, int]:
+    first = min([v for v in (conn.execute("SELECT MIN(last_seen) FROM flow_rollup").fetchone()[0],
+                             conn.execute("SELECT MIN(last_seen) FROM flow_log").fetchone()[0]) if v] or [now - 86400])
+    span = max(86400, now - first)
+    bucket = next(b for b in (HOUR, 4 * HOUR, 12 * HOUR, 86400, 7 * 86400, 30 * 86400) if span / b <= 120)
+    return span, bucket
 
 # How a flow is labelled when grouping: its app, else the network owner, else Unknown.
 APP = "COALESCE(NULLIF(app, ''), NULLIF(org, ''), 'Unknown')"
@@ -45,31 +91,34 @@ def _where(f: dict, since: int, dns=False):
 
 
 def dashboard(conn, range_key: str, f: dict) -> dict:
-    span, bucket = RANGES.get(range_key, RANGES["24h"])
     now = int(time.time())
+    span, bucket = RANGES.get(range_key) or RANGES["24h"]
+    if range_key == "all":
+        span, bucket = _all_time(conn, now)
     since = now - span
+    flows, dnslog = _sources(conn, since)
     where, p = _where(f, since)
 
     k = conn.execute(f"""SELECT COALESCE(SUM(bytes_in), 0) down, COALESCE(SUM(bytes_out), 0) up,
                          COALESCE(SUM(conns), 0) conns, COUNT(DISTINCT COALESCE(device_id, src)) clients,
                          COUNT(DISTINCT {DEST}) dests, COUNT(DISTINCT NULLIF(country, '')) countries
-                         FROM flow_log WHERE {where}""", p).fetchone()
+                         FROM {flows} WHERE {where}""", p).fetchone()
     dwhere, dp = _where(f, since, dns=True)
-    dns_total = conn.execute(f"SELECT COALESCE(SUM(count), 0) FROM dns_log WHERE {dwhere}", dp).fetchone()[0]
+    dns_total = conn.execute(f"SELECT COALESCE(SUM(count), 0) FROM {dnslog} WHERE {dwhere}", dp).fetchone()[0]
 
     def top(group, label_cols, order=BYTES, limit=10, extra=""):
         rows = conn.execute(f"""SELECT {label_cols}, SUM(bytes_in) down, SUM(bytes_out) up, SUM(conns) conns,
                                 COUNT(DISTINCT COALESCE(device_id, src)) clients {extra}
-                                FROM flow_log WHERE {where} GROUP BY {group} ORDER BY {order} DESC LIMIT {limit}""",
+                                FROM {flows} WHERE {where} GROUP BY {group} ORDER BY {order} DESC LIMIT {limit}""",
                             p).fetchall()
         return [dict(r) for r in rows]
 
     categories = {r["name"]: dict(r) for r in conn.execute(
         f"""SELECT {CATEGORY} name, SUM(bytes_in) down, SUM(bytes_out) up, SUM(conns) conns
-            FROM flow_log WHERE {where} GROUP BY name""", p)}
+            FROM {flows} WHERE {where} GROUP BY name""", p)}
     timeline = {}
     for r in conn.execute(f"""SELECT (last_seen / {bucket}) * {bucket} t, {CATEGORY} c, {BYTES} b
-                              FROM flow_log WHERE {where} GROUP BY t, c""", p):
+                              FROM {flows} WHERE {where} GROUP BY t, c""", p):
         timeline.setdefault(r["t"], {})[r["c"]] = r["b"]
 
     # interface throughput from server metrics (accurate even for connections still open)
@@ -86,16 +135,16 @@ def dashboard(conn, range_key: str, f: dict) -> dict:
     clients = top("COALESCE(device_id, src)", "device_id, MAX(user_email) user, MAX(device_name) device, "
                   "MAX(src) ip", limit=10)
     for c in clients:  # what each client mostly uses
-        r = conn.execute(f"""SELECT {APP} a FROM flow_log WHERE {where} AND COALESCE(device_id, src) = ?
+        r = conn.execute(f"""SELECT {APP} a FROM {flows} WHERE {where} AND COALESCE(device_id, src) = ?
                              GROUP BY a ORDER BY {BYTES} DESC LIMIT 1""",
                          p + [c["device_id"] if c["device_id"] is not None else c["ip"]]).fetchone()
         c["top_app"] = r["a"] if r else ""
     dns_rows = conn.execute(f"""SELECT name, MAX(COALESCE(NULLIF(app, ''), '')) app, MAX(category) category,
                                 SUM(count) lookups, COUNT(DISTINCT COALESCE(device_id, user_email)) clients
-                                FROM dns_log WHERE {dwhere} GROUP BY name ORDER BY lookups DESC LIMIT 12""",
+                                FROM {dnslog} WHERE {dwhere} GROUP BY name ORDER BY lookups DESC LIMIT 12""",
                             dp).fetchall()
     servers = conn.execute(f"""SELECT node_id id, MAX(node_name) name, SUM(bytes_in) down, SUM(bytes_out) up,
-                               SUM(conns) conns FROM flow_log WHERE {where} GROUP BY node_id
+                               SUM(conns) conns FROM {flows} WHERE {where} GROUP BY node_id
                                ORDER BY {BYTES} DESC LIMIT 10""", p).fetchall()
     return {
         "range": range_key, "bucket": bucket, "since": since, "until": now,

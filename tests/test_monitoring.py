@@ -95,7 +95,7 @@ def test_retention_purges_old_rows(client, monkeypatch):
     secret = add_node(client)
     post_sync(client, secret, metrics=METRICS)
     with db.session() as conn:
-        conn.execute("UPDATE node_metrics SET ts = ts - 30 * 86400")
+        conn.execute("UPDATE node_metrics SET ts = ts - 31 * 86400")
         monitoring.purge(conn)
         assert conn.execute("SELECT COUNT(*) FROM node_metrics").fetchone()[0] == 0
 

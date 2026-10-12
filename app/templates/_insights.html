@@ -1,15 +1,11 @@
-{% extends "base.html" %}
-{% block title %}Traffic insights · {{ brand }}{% endblock %}
-{% block page %}insights{% endblock %}
-
-{% block main %}<main class="wide">
-<a href="/admin" class="small">← Dashboard</a>
-<div class="section-head" style="margin-top:6px">
-  <div><h1 style="margin:0">Traffic insights</h1>
-    <span class="muted small">What's going over the VPN — apps, clients, destinations and live flows. Kept {{ flow_days }} days.</span></div>
+{# Traffic insights tab of the admin dashboard; driven by static/insights.js #}
+<div id="insights-root">
+<div class="section-head" style="margin-top:0">
+  <div><h2 style="margin:0">Traffic insights</h2>
+    <span class="muted small">What's going over the VPN — apps, clients, destinations and live flows. Detailed flows kept {{ flow_days }} days, hourly totals {{ rollup_days }} days.</span></div>
   <div class="toolbar">
     <div class="seg" role="group" aria-label="Time range">
-      <button data-range="1h">1H</button><button data-range="24h">24H</button><button data-range="7d">7D</button>
+      <button data-range="1h">1H</button><button data-range="24h">24H</button><button data-range="7d">7D</button><button data-range="30d">30D</button><button data-range="all">All</button>
     </div>
     <select id="ins-node" aria-label="Server" style="width:auto;margin:0">
       <option value="">All servers</option>
@@ -29,10 +25,20 @@
 </div></div>
 {% endif %}
 
+{% if geo.enabled and not geo.ranges %}
+<div class="card notice warn" style="margin-bottom:14px"><div>
+  <b>The IP owner database isn't loaded{{ ' yet — downloading now' if geo.running }}.</b> Without it, traffic without a website name shows as <b>Unknown</b>
+  (no network owner or country).{% if geo.error %} Last attempt failed: <code>{{ geo.error }}</code>{% endif %}
+  Once it loads, the last month of Unknowns is re-labelled automatically.
+</div>
+{% if not geo.running %}<form method="post" action="/admin/insights/geo"><button class="btn sm">Download now</button></form>{% endif %}
+</div>
+{% endif %}
+
 <div class="ins-filters">
   <label class="search" style="margin:0"><span class="sr-only">Search</span>
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-    <input type="search" id="ins-q" placeholder="Search customer, device, website, IP…"></label>
+    <input type="search" id="ins-q" placeholder="Search device, site or IP…"></label>
   <div id="ins-chips" class="chips"></div>
   <span class="muted small" id="ins-updated"></span>
 </div>
@@ -65,7 +71,7 @@
   <section class="card"><div class="card-title"><h3>Top apps</h3><span class="muted small">by data</span></div><ol class="barlist" id="list-apps"></ol></section>
   <section class="card"><div class="card-title"><h3>Top clients</h3><span class="muted small">devices</span></div><ol class="barlist" id="list-clients"></ol></section>
   <section class="card"><div class="card-title"><h3>Top destinations</h3><span class="muted small">websites &amp; IPs</span></div><ol class="barlist" id="list-dests"></ol></section>
-  <section class="card"><div class="card-title"><h3>Destination countries</h3>{% if not geo_enabled %}<span class="muted small">lookup off</span>{% endif %}</div><ol class="barlist" id="list-countries"></ol></section>
+  <section class="card"><div class="card-title"><h3>Destination countries</h3>{% if not geo.enabled %}<span class="muted small">lookup off</span>{% endif %}</div><ol class="barlist" id="list-countries"></ol></section>
   <section class="card"><div class="card-title"><h3>DNS lookups</h3><span class="muted small">most requested names</span></div><ol class="barlist" id="list-dns"></ol></section>
   <section class="card"><div class="card-title"><h3>Ports &amp; protocols</h3><span class="muted small">by connections</span></div><ol class="barlist" id="list-ports"></ol></section>
   <section class="card" id="servers-card"><div class="card-title"><h3>Servers</h3><span class="muted small">by data</span></div><ol class="barlist" id="list-servers"></ol></section>
@@ -84,9 +90,6 @@
 </section>
 <p class="muted small" style="margin-top:14px">Website names come from the DNS lookups devices make through the tunnel; apps using encrypted DNS show the destination's network owner instead.
   Bytes per connection are counted when it closes, so totals for long-lived connections arrive late — the bandwidth chart shows live server traffic.
-  {% if geo_enabled %}Countries and network owners: <a href="https://iptoasn.com" rel="noopener">iptoasn.com</a> (public domain).{% endif %}</p>
-</main>
+  {% if geo.ranges %}Countries and network owners: {{ geo.source }} ({{ '{:,}'.format(geo.ranges) }} ranges, updated {{ geo.updated|ts }}).{% endif %}</p>
 <script type="application/json" id="ins-config">{{ {'categories': categories, 'flags': flag_codes}|tojson }}</script>
-{% endblock %}
-
-{% block scripts %}<script src="/static/insights.js?v={{ asset_v['insights.js'] }}"></script>{% endblock %}
+</div>

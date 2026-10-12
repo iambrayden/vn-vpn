@@ -1,6 +1,16 @@
 // Traffic insights dashboard: KPIs, bandwidth, categories, top lists and a live flow feed.
 // Every list row is a filter: click it to narrow the whole dashboard (kept in the URL).
 (() => {
+  const root = document.getElementById('insights-root');
+  if (!root) return;
+  const panel = root.closest('[data-panel]');
+  const visible = () => !document.hidden && !(panel && panel.hidden);
+  let started = false;
+  const boot = () => { if (!started && visible()) { started = true; start(); } };
+  document.addEventListener('tab-shown', boot);
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else setTimeout(boot);
+
+  function start() {
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const cfg = JSON.parse($('#ins-config').textContent);
@@ -46,7 +56,7 @@
   const FILTER_KEYS = ['node', 'device', 'user', 'category', 'app', 'country', 'dest', 'port', 'q'];
   const LABELS = { node: 'Server', device: 'Device', user: 'Customer', category: 'Category', app: 'App', country: 'Country', dest: 'Destination', port: 'Port', q: 'Search' };
   const url = new URL(location.href);
-  let range = ['1h', '24h', '7d'].includes(url.searchParams.get('range')) ? url.searchParams.get('range') : '24h';
+  let range = ['1h', '24h', '7d', '30d', 'all'].includes(url.searchParams.get('range')) ? url.searchParams.get('range') : '24h';
   const filters = {}, names = {};
   for (const k of FILTER_KEYS) if (url.searchParams.get(k)) filters[k] = url.searchParams.get(k);
   try { Object.assign(names, JSON.parse(sessionStorage.getItem('ins-names') || '{}')); } catch { /* private mode */ }
@@ -55,7 +65,7 @@
     const p = new URLSearchParams({ range, ...filters, ...extra });
     return p.toString();
   };
-  const syncUrl = () => history.replaceState(null, '', `?${query()}`);
+  const syncUrl = () => history.replaceState(null, '', `${location.pathname}?${query()}${panel ? '#insights' : ''}`);
   const label = (k, val) => names[`${k}:${val}`] || (k === 'country' ? countryName(val) : k === 'node' ? ($(`#ins-node option[value="${CSS.escape(val)}"]`)?.textContent || val) : val);
 
   function setFilter(k, val, name) {
@@ -289,7 +299,10 @@
   }
   renderChips();
   refresh(true);
-  setInterval(() => { if (!document.hidden) refresh(); }, 30000);
-  setInterval(() => { if (!document.hidden && !paused) pollLive(); }, 5000);
-  let rt; addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => lastData && render(lastData), 150); });
+  setInterval(() => { if (visible()) refresh(); }, 30000);
+  setInterval(() => { if (visible() && !paused) pollLive(); }, 5000);
+  let rt; addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => lastData && visible() && render(lastData), 150); });
+  // charts are drawn at the panel's width: redraw when the tab is shown again
+  document.addEventListener('tab-shown', e => { if (e.detail === 'insights' && lastData) { render(lastData); refresh(); } });
+  }
 })();

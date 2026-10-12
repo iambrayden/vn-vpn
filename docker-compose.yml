@@ -34,7 +34,8 @@ services:
       - SESSION_LOG_DAYS=${SESSION_LOG_DAYS:-30}
       - FLOW_LOG_DAYS=${FLOW_LOG_DAYS:-7}
       - GEO_LOOKUP=${GEO_LOOKUP:-true}
-      - METRICS_DAYS=${METRICS_DAYS:-7}
+      - INSIGHTS_DAYS=${INSIGHTS_DAYS:-365}
+      - METRICS_DAYS=${METRICS_DAYS:-30}
     volumes:
       - vnvpn-data:/data
     healthcheck:

@@ -386,7 +386,7 @@ a.chip { text-decoration: none; display: inline-block; }
   :root { --cat-1: #3987e5; --cat-2: #d95926; --cat-3: #199e70; --cat-4: #c98500; --cat-5: #d55181; --cat-6: #9085e9;
     --cat-7: #e66767; --cat-8: #64748b; }
 }
-main.wide { max-width: 1400px; }
+main.wide, body.wide main, body.wide .topbar-inner { max-width: 1400px; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--card); }
 .seg button { font: inherit; font-size: 13px; font-weight: 650; padding: 7px 12px; border: 0; background: none; color: var(--muted); cursor: pointer; }
 .seg button + button { border-left: 1px solid var(--line); }

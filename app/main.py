@@ -8,6 +8,7 @@ import ipaddress
 import os
 import re
 import secrets
+import threading
 import time
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -818,6 +819,7 @@ def admin(request: Request):
                                  ORDER BY created_at DESC""").fetchall()
         sessions = live_sessions(conn)
         metrics = monitoring.latest_metrics(conn)
+        insights_ctx = insights_context(conn)
     for n in nodes:
         n["m"] = metrics.get(n["id"])
         try:
@@ -830,7 +832,8 @@ def admin(request: Request):
                   webhook_configured=bool(billing.STRIPE_WEBHOOK_SECRET),
                   price_problems={k: billing.price_errors.get(k) for k in billing.PLANS
                                   if billing.enabled() and not billing.price_label(k)}
-                                 if billing.enabled() else {})
+                                 if billing.enabled() else {},
+                  **insights_ctx)
 
 
 @app.get("/admin/servers/{node_id}", response_class=HTMLResponse)
@@ -931,17 +934,29 @@ def _insight_filters(request: Request) -> dict:
     return {k: v for k, v in f.items() if v}
 
 
-@app.get("/admin/insights", response_class=HTMLResponse)
+def insights_context(conn) -> dict:
+    """Template variables for the Insights tab."""
+    old_agents = [n["name"] for n in conn.execute("SELECT name, agent_version FROM nodes WHERE enabled = 1")
+                  if version_tuple(n["agent_version"]) < (0, 5, 0)]
+    return {"log_destinations": monitoring.LOG_DESTINATIONS, "flow_days": monitoring.FLOW_LOG_DAYS,
+            "rollup_days": monitoring.INSIGHTS_DAYS, "categories": apps.CATEGORIES, "old_agents": old_agents,
+            "geo": geo.status(), "flag_codes": sorted(countries.COUNTRIES)}
+
+
+@app.get("/admin/insights")
 def admin_insights(request: Request):
+    require_admin(request)  # the dashboard is a tab of /admin now; keep old links (and their filters) working
+    q = request.url.query
+    return RedirectResponse(f"/admin{'?' + q if q else ''}#insights", status_code=303)
+
+
+@app.post("/admin/insights/geo")
+def admin_insights_geo(request: Request):
+    """Download the IP owner/country database now (in the background - it takes a minute)."""
     require_admin(request)
-    with db.session() as conn:
-        nodes = conn.execute("SELECT id, name, country FROM nodes ORDER BY name").fetchall()
-        has_names = conn.execute("SELECT 1 FROM flow_log WHERE host != '' LIMIT 1").fetchone()
-        old_agents = [n["name"] for n in conn.execute("SELECT name, agent_version FROM nodes WHERE enabled = 1")
-                      if version_tuple(n["agent_version"]) < (0, 5, 0)]
-    return render(request, "insights.html", nodes=nodes, log_destinations=monitoring.LOG_DESTINATIONS,
-                  flow_days=monitoring.FLOW_LOG_DAYS, categories=apps.CATEGORIES, has_names=bool(has_names),
-                  old_agents=old_agents, geo_enabled=geo.ENABLED, flag_codes=sorted(countries.COUNTRIES))
+    threading.Thread(target=geo.refresh_if_stale, kwargs={"force": True}, daemon=True).start()
+    flash(request, "Downloading the IP owner database — reload this page in a minute.", "info")
+    return RedirectResponse("/admin#insights", status_code=303)
 
 
 @app.get("/admin/insights/data.json")
