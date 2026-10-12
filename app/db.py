@@ -143,6 +143,21 @@ CREATE TABLE IF NOT EXISTS flow_log (
 CREATE INDEX IF NOT EXISTS flow_log_seen ON flow_log (last_seen);
 CREATE INDEX IF NOT EXISTS flow_log_dst ON flow_log (dst);
 
+-- DNS names customers looked up through the tunnel (counts per check-in).
+CREATE TABLE IF NOT EXISTS dns_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          INTEGER NOT NULL,
+    node_id     INTEGER REFERENCES nodes(id) ON DELETE SET NULL,
+    device_id   INTEGER REFERENCES devices(id) ON DELETE SET NULL,
+    user_email  TEXT NOT NULL,
+    device_name TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    app         TEXT NOT NULL DEFAULT '',
+    category    TEXT NOT NULL DEFAULT '',
+    count       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS dns_log_ts ON dns_log (ts);
+
 CREATE TABLE IF NOT EXISTS stripe_events (
     id         TEXT PRIMARY KEY,
     type       TEXT NOT NULL,
@@ -206,6 +221,12 @@ MIGRATIONS = [
     ("devices", "hs_churn", "INTEGER NOT NULL DEFAULT 0"),
     ("devices", "hs_churn_at", "INTEGER NOT NULL DEFAULT 0"),
     ("device_stats", "endpoint", "TEXT NOT NULL DEFAULT ''"),       # last client ip:port seen by that server
+    # traffic insights: what each destination is
+    ("flow_log", "host", "TEXT NOT NULL DEFAULT ''"),               # DNS name the client looked it up as
+    ("flow_log", "app", "TEXT NOT NULL DEFAULT ''"),
+    ("flow_log", "category", "TEXT NOT NULL DEFAULT ''"),
+    ("flow_log", "country", "TEXT NOT NULL DEFAULT ''"),            # of the destination
+    ("flow_log", "org", "TEXT NOT NULL DEFAULT ''"),                # network owner of the destination
 ]
 
 

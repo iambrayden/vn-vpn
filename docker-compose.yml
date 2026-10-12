@@ -33,6 +33,7 @@ services:
       - LOG_DESTINATIONS=${LOG_DESTINATIONS:-true}
       - SESSION_LOG_DAYS=${SESSION_LOG_DAYS:-30}
       - FLOW_LOG_DAYS=${FLOW_LOG_DAYS:-7}
+      - GEO_LOOKUP=${GEO_LOOKUP:-true}
       - METRICS_DAYS=${METRICS_DAYS:-7}
     volumes:
       - vnvpn-data:/data

@@ -11,19 +11,21 @@ peers this node should accept, then applies it with `wg syncconf` (no tunnel int
 The node's private key never leaves the server.
 """
 import argparse
+import ctypes
 import ipaddress
 import json
 import os
 import socket
 import subprocess
 import shutil
+import struct
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 CONF_DIR = os.environ.get("VNVPN_DIR", "/etc/vnvpn")
 CONF_FILE = os.path.join(CONF_DIR, "agent.json")
 KEY_FILE = os.path.join(CONF_DIR, "private.key")
@@ -251,13 +253,163 @@ def parse_conntrack(line):
             int(orig.get("bytes", 0)), int(reply.get("bytes", 0)))
 
 
+# --------------------------------------------------------------------------- DNS names for destinations
+
+# Classic BPF, run in the kernel: accept only IPv4, UDP, unfragmented, source port 53 (DNS answers).
+# On wg0 (no link layer) packets start at the IP header.
+_DNS_BPF = [
+    (0x30, 0, 0, 0),        # ldb [0]
+    (0x54, 0, 0, 0xF0),     # and #0xf0
+    (0x15, 0, 8, 0x40),     # jeq #0x40 (IPv4)        else drop
+    (0x30, 0, 0, 9),        # ldb [9]
+    (0x15, 0, 6, 17),       # jeq #17 (UDP)           else drop
+    (0x28, 0, 0, 6),        # ldh [6]
+    (0x45, 4, 0, 0x1FFF),   # jset #0x1fff (fragment) -> drop
+    (0xB1, 0, 0, 0),        # ldxb 4*([0]&0xf)  (IP header length)
+    (0x48, 0, 0, 0),        # ldh [x+0]  (UDP source port)
+    (0x15, 0, 1, 53),       # jeq #53                 else drop
+    (0x06, 0, 0, 0xFFFF),   # accept
+    (0x06, 0, 0, 0),        # drop
+]
+
+
+class _SockFilter(ctypes.Structure):
+    _fields_ = [("code", ctypes.c_uint16), ("jt", ctypes.c_uint8), ("jf", ctypes.c_uint8), ("k", ctypes.c_uint32)]
+
+
+class _SockFprog(ctypes.Structure):
+    _fields_ = [("len", ctypes.c_uint16), ("filter", ctypes.POINTER(_SockFilter))]
+
+
+def _dns_name(buf, off, depth=0):
+    """Read a (possibly compressed) DNS name; returns (name, offset after it)."""
+    labels, end = [], None
+    while depth < 20:
+        n = buf[off]
+        if n == 0:
+            off += 1
+            break
+        if n & 0xC0 == 0xC0:
+            if end is None:
+                end = off + 2
+            off = ((n & 0x3F) << 8) | buf[off + 1]
+            depth += 1
+            continue
+        labels.append(buf[off + 1:off + 1 + n].decode("ascii", "replace"))
+        off += 1 + n
+    return ".".join(labels).lower(), (end if end is not None else off)
+
+
+def parse_dns_answer(packet):
+    """IPv4/UDP DNS response -> (client_ip, query_name, [(answer_ip, ttl), ...]) or None."""
+    try:
+        ihl = (packet[0] & 0x0F) * 4
+        client = _socket_ntoa(packet[16:20])
+        dns = packet[ihl + 8:]
+        _id, flags, qd, an = struct.unpack("!HHHH", dns[:8])
+        if not flags & 0x8000 or qd < 1:
+            return None
+        qname, off = _dns_name(dns, 12)
+        off += 4
+        for _ in range(qd - 1):
+            _, off = _dns_name(dns, off)
+            off += 4
+        ips = []
+        for _ in range(an):
+            _, off = _dns_name(dns, off)
+            rtype, _cls, ttl, rdlen = struct.unpack("!HHIH", dns[off:off + 10])
+            off += 10
+            if rtype == 1 and rdlen == 4:
+                ips.append((_socket_ntoa(dns[off:off + 4]), ttl))
+            off += rdlen
+        return client, qname, ips
+    except (IndexError, struct.error, ValueError):
+        return None
+
+
+def _socket_ntoa(b):
+    return ".".join(str(x) for x in b)
+
+
+class DnsWatcher:
+    """Learns which name each destination IP was looked up as, per client, from DNS answers on wg0.
+    Only DNS replies reach Python (kernel BPF filter), so busy tunnels cost nothing extra."""
+    MAX_ENTRIES = 200_000
+
+    def __init__(self, iface):
+        self.iface = iface
+        self.names = {}          # (client_ip, answer_ip) -> (name, expires)
+        self.queries = {}        # (client_ip, name) -> count since last drain
+        self.lock = threading.Lock()
+        self.running = False
+
+    def start(self):
+        import socket
+        try:
+            s = socket.socket(socket.AF_PACKET, socket.SOCK_DGRAM, socket.htons(0x0800))
+            prog = (_SockFilter * len(_DNS_BPF))(*[_SockFilter(*i) for i in _DNS_BPF])
+            s.setsockopt(socket.SOL_SOCKET, 26, bytes(_SockFprog(len(_DNS_BPF), prog)))  # SO_ATTACH_FILTER
+            s.bind((self.iface, 0))
+        except OSError as e:
+            log(f"DNS names unavailable ({e}); destinations will show as IPs")
+            return False
+        self.sock, self.running = s, True
+        threading.Thread(target=self._read, daemon=True).start()
+        log(f"watching DNS answers on {self.iface}")
+        return True
+
+    def stop(self):
+        self.running = False
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
+    def _read(self):
+        while self.running:
+            try:
+                pkt = self.sock.recv(65535)
+            except OSError:
+                if not self.running:
+                    return
+                time.sleep(2)  # interface restarted: rebind
+                try:
+                    self.sock.bind((self.iface, 0))
+                except OSError:
+                    pass
+                continue
+            self.add(parse_dns_answer(pkt))
+
+    def add(self, ans):
+        if not ans:
+            return
+        client, name, ips = ans
+        now = time.time()
+        with self.lock:
+            self.queries[(client, name)] = self.queries.get((client, name), 0) + 1
+            if len(self.names) > self.MAX_ENTRIES:
+                self.names = {k: v for k, v in self.names.items() if v[1] > now}
+            for ip, ttl in ips:
+                self.names[(client, ip)] = (name, now + max(ttl, 300))
+
+    def lookup(self, client, ip):
+        v = self.names.get((client, ip))
+        return v[0] if v else ""
+
+    def drain(self):
+        with self.lock:
+            q, self.queries = self.queries, {}
+        return [{"src": c, "name": n, "count": k} for (c, n), k in list(q.items())[:5000]]
+
+
 class FlowCollector:
     """Aggregates connections from VPN clients by (client, destination, port, protocol)."""
     MAX_KEYS = 20000
     install_attempted = False
 
-    def __init__(self, subnet):
+    def __init__(self, subnet, dns=None):
         self.subnet = subnet
+        self.dns = dns
         self.flows, self.dropped = {}, 0
         self.lock = threading.Lock()
         self.proc = None
@@ -309,7 +461,8 @@ class FlowCollector:
                     self.dropped += 1
                     return
                 f = self.flows[key] = {"src": src, "dst": dst, "dport": dport, "proto": proto,
-                                       "first": now, "last": now, "conns": 0, "out": 0, "in": 0}
+                                       "first": now, "last": now, "conns": 0, "out": 0, "in": 0,
+                                       "host": self.dns.lookup(src, dst) if self.dns else ""}
             f["last"] = now
             if event == "NEW":
                 f["conns"] += 1
@@ -454,6 +607,7 @@ def run(args):
         log(f"server stats unavailable: {e}")
         metrics = None
     flows, unsent_flows, last_error, flow_failed = None, [], "", False
+    dns = None
     public_ip, public_ip_at = "", 0.0
     while True:
         try:
@@ -470,6 +624,8 @@ def run(args):
             if flows:
                 unsent_flows = (unsent_flows + flows.drain())[-FlowCollector.MAX_KEYS:]
                 body["flows"] = unsent_flows
+            if dns:
+                body["dns"] = dns.drain()
             desired = http("POST", f"{conf['panel']}/api/agent/sync", body, secret=conf["secret"])
             unsent_flows = []
             interval, failures = int(desired.get("interval", 15)), 0
@@ -481,16 +637,23 @@ def run(args):
                 log(last_error)
             # destination logging is switched on/off from the panel
             if desired.get("flow_logging") and not flows and not flow_failed and not DRY_RUN:
-                flows = FlowCollector(desired.get("subnet") or desired["address"])
+                dns = DnsWatcher(conf["interface"])
+                if not dns.start():
+                    dns = None
+                flows = FlowCollector(desired.get("subnet") or desired["address"], dns)
                 if not flows.start():
                     flows, flow_failed = None, True  # don't retry every check-in
             elif not desired.get("flow_logging") and flows:
                 flows.stop()
-                flows, unsent_flows = None, []
+                if dns:
+                    dns.stop()
+                flows, unsent_flows, dns = None, [], None
             latest = desired.get("agent_version")
             if latest and latest != VERSION and not args.once and not DRY_RUN and time.time() > _skip_update_until:
                 if flows:
                     flows.stop()
+                if dns:
+                    dns.stop()
                 self_update(conf, latest)
         except urllib.error.HTTPError as e:
             failures += 1

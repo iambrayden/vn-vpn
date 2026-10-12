@@ -41,6 +41,27 @@
 </div>
 
 <!-- setup guide: open until the user has connected once -->
+{% if mobile_os %}
+{% set store = {'ios': ('App Store', 'https://apps.apple.com/app/wireguard/id1441195209'),
+                'android': ('Google Play', 'https://play.google.com/store/apps/details?id=com.wireguard.android')}[mobile_os] %}
+<details class="card setup phone-setup" {{ 'open' if not ever_connected }}>
+  <summary>
+    <div><h2>{{ 'Set up this phone' if not ever_connected else 'Set up this phone again' }}</h2>
+      <span class="muted small">Three taps, about a minute.</span></div>
+    <svg class="chev" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+  </summary>
+  <ol class="phone-steps">
+    <li><div><b>Get the WireGuard app</b><span class="muted small">Free, from the official developers.</span></div>
+      <a class="btn sm" href="{{ store[1] }}" target="_blank" rel="noopener">{{ store[0] }}</a></li>
+    <li><div><b>Tap “Add to WireGuard” on a location</b>
+      <span class="muted small">Setting up <b data-k="device-name">{{ selected.name }}</b>. Each location becomes its own tunnel, already named — e.g. <b>{{ nodes[0].tunnel if nodes else 'US-Chicago' }}</b>.</span></div>
+      <a class="btn sm primary" href="#locations">Go</a></li>
+    <li><div><b>Open the file in WireGuard &amp; switch it on</b>
+      <span class="muted small">{% if mobile_os == 'ios' %}Open the download, tap <b>Share</b> → <b>WireGuard</b>, then <b>Allow</b> the VPN.{% else %}In WireGuard tap <b>+</b> → <b>Import from file or archive</b> → pick the file from Downloads.{% endif %}
+        This page turns green when you're protected.</span></div></li>
+  </ol>
+</details>
+{% else %}
 <details class="card setup" {{ 'open' if not ever_connected }}>
   <summary>
     <div><h2>{{ 'Get connected in 3 steps' if not ever_connected else 'How to connect a new device' }}</h2>
@@ -71,6 +92,7 @@
     </div>
   </div>
 </details>
+{% endif %}
 
 <!-- devices -->
 <section id="devices">
@@ -172,10 +194,13 @@
         <span data-k="load">{{ load_label(n.load) }}</span>
       </div>
       <div class="server-actions">
-        <a class="btn primary" data-config-node="{{ n.id }}" data-device-href="/portal/config/{{ n.id }}.conf" href="/portal/config/{{ n.id }}.conf?device={{ selected.id }}">{{ icon_dl }} Download</a>
+        <a class="btn primary" data-config-node="{{ n.id }}" data-tunnel="{{ n.tunnel }}" data-device-href="/portal/config/{{ n.id }}.conf" href="/portal/config/{{ n.id }}.conf?device={{ selected.id }}"
+           title="Saves {{ n.tunnel }}.conf — it shows up in WireGuard as “{{ n.tunnel }}”">{{ icon_dl }} {{ 'Add to WireGuard' if mobile_os else 'Download' }}</a>
+        {% if not mobile_os %}
         <button class="btn" data-config-node="{{ n.id }}" data-open="qr-{{ n.id }}" title="Show QR code to scan with your phone">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 17h4v4"/></svg>
           QR</button>
+        {% endif %}
       </div>
     </article>
     {% endfor %}
@@ -278,10 +303,35 @@
            onerror="this.classList.add('failed'); this.nextElementSibling.hidden = false">
       <div class="qr-error" hidden>Couldn't load the QR code. Refresh the page, or use <a data-device-href="/portal/config/{{ n.id }}.conf" href="/portal/config/{{ n.id }}.conf?device={{ selected.id }}">Download</a> instead.</div>
     </div>
-    <p class="muted small">In WireGuard on your phone, tap <b>+</b> → <b>Scan from QR code</b>.<br>Keep this code private — it's your personal key.</p>
+    <p class="muted small">In WireGuard on your phone, tap <b>+</b> → <b>Scan from QR code</b>.</p>
+    <div class="tunnel-name">When WireGuard asks for a name, use
+      <span class="cmd-inline"><code id="tn-{{ n.id }}">{{ n.tunnel }}</code><button type="button" class="btn sm ghost" data-copy="#tn-{{ n.id }}">Copy</button></span></div>
+    <p class="muted small">Keep this code private — it's your personal key.</p>
   </div>
 </dialog>
 {% endfor %}
+
+{% if mobile_os %}
+<dialog id="import-help">
+  <div class="dlg-head"><h2>Add <span data-k="tunnel"></span> to WireGuard</h2><button type="button" class="btn ghost icon" data-close aria-label="Close">✕</button></div>
+  <div class="dlg-body">
+    <p class="muted small" style="margin-top:14px">The file <b><span data-k="tunnel"></span>.conf</b> is downloading. It shows up in WireGuard named <b data-k="tunnel"></b>.</p>
+    <ol class="import-steps">
+      {% if mobile_os == 'ios' %}
+      <li>Tap <b>Download</b> if Safari asks, then open it from the <b>⬇</b> downloads button in the address bar.</li>
+      <li>Tap <b>Share</b> <span class="muted">(the square with an arrow)</span> → <b>WireGuard</b>.</li>
+      <li>Tap <b>Allow</b> to add the VPN configuration, then switch the tunnel on.</li>
+      {% else %}
+      <li>Open the <b>WireGuard</b> app.</li>
+      <li>Tap <b>+</b> → <b>Import from file or archive</b>, and pick <b><span data-k="tunnel"></span>.conf</b> from Downloads.</li>
+      <li>Switch the tunnel on and tap <b>OK</b> to allow the VPN connection.</li>
+      {% endif %}
+    </ol>
+    <p class="muted small">Don't have WireGuard yet? <a href="{{ 'https://apps.apple.com/app/wireguard/id1441195209' if mobile_os == 'ios' else 'https://play.google.com/store/apps/details?id=com.wireguard.android' }}" target="_blank" rel="noopener">Get it free</a>, then tap the file again.</p>
+  </div>
+  <div class="dlg-foot"><button type="button" class="btn primary" data-close>Done</button></div>
+</dialog>
+{% endif %}
 
 <dialog id="dup-config">
   <div class="dlg-head"><h2>Setting up another phone or computer?</h2><button type="button" class="btn ghost icon" data-close aria-label="Close">✕</button></div>

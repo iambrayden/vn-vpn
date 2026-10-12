@@ -67,6 +67,7 @@ Agents (v0.3.0+) report system stats on every check-in. Click a server in **Admi
 **Traffic log** (**Admin → Traffic log**):
 - *Connections* — customer, device, the public IP they connected from, server, start, duration, data. Off with `LOG_SESSIONS=false`; kept `SESSION_LOG_DAYS` (30).
 - *Destinations* — every destination IP/port/protocol each device connected to, with connection count and bytes, from the server's connection-tracking table (`conntrack`). Off with `LOG_DESTINATIONS=false` (agents stop collecting within ~15 s); kept `FLOW_LOG_DAYS` (7). Group by destination to see the top destinations.
+- *Traffic insights* (`/admin/insights`) — a UniFi-style dashboard over the same data: bandwidth, data by category (Streaming, Social, Gaming…), top apps, clients, destinations, countries, DNS lookups, ports, and a live flow feed. Click anything to filter the whole page. Website names come from the DNS answers devices receive through the tunnel (agent 0.5+, watched with an in-kernel filter on `wg0`); destination country and network owner come from the free [iptoasn.com](https://iptoasn.com) database, downloaded weekly into `geo.db` next to the panel database (`GEO_LOOKUP=false` to turn off).
 
 > ⚖️ Logging customer traffic is a significant privacy decision for a VPN. Say exactly what you record and for how long in your privacy policy/terms, and check the rules where you and your customers are (e.g. GDPR in the EU). Use the retention settings to keep no more than you need.
 

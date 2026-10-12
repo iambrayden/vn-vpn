@@ -22,7 +22,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import billing, countries, crypto, db, monitoring
+from . import apps, billing, countries, crypto, db, geo, insights, monitoring
 
 log = logging.getLogger("vnvpn")
 
@@ -137,7 +137,7 @@ def _asset_version(name: str) -> str:
     return hashlib.sha256((BASE / "static" / name).read_bytes()).hexdigest()[:10]
 
 
-templates.env.globals["asset_v"] = {n: _asset_version(n) for n in ("app.js", "style.css")}
+templates.env.globals["asset_v"] = {n: _asset_version(n) for n in ("app.js", "style.css", "insights.js")}
 
 
 # --------------------------------------------------------------------------- helpers
@@ -420,6 +420,9 @@ def portal_nodes(conn, devices):
         n["load"] = min(100, round(100 * active.get(n["id"], 0) / NODE_CAPACITY))
         n["country_name"] = countries.COUNTRIES.get(n["country"], "")
         n["recommended"] = False
+    names = tunnel_names(nodes)
+    for n in nodes:
+        n["tunnel"] = names[n["id"]]
     online = [n for n in nodes if n["online"]]
     if len(online) > 1:
         min(online, key=lambda n: n["load"])["recommended"] = True
@@ -468,7 +471,8 @@ def portal(request: Request):
         return render(request, "pricing.html", **plan_context(user))
     with db.session() as conn:
         if not conn.execute("SELECT 1 FROM devices WHERE user_id = ?", (user["id"],)).fetchone():
-            add_device(conn, user, "My device")  # first visit after subscribing: one ready-to-use device
+            # first visit after subscribing: one ready-to-use device, named after the phone it's opened on
+            add_device(conn, user, MOBILE_DEVICE_NAMES.get(mobile_os(request), "My device"))
         devices = user_devices(conn, user)
         nodes = portal_nodes(conn, devices)
         period = request.query_params.get("usage", "month")
@@ -479,6 +483,7 @@ def portal(request: Request):
                   device_nodes={str(d["id"]): {"name": d["name"], "nodes": d["node_ids"]} for d in devices},
                   usage_periods=USAGE_PERIODS,
                   ever_connected=any(d["last_handshake"] for d in devices), max_devices=billing.MAX_DEVICES,
+                  mobile_os=mobile_os(request),
                   **plan_context(user))
 
 
@@ -628,7 +633,32 @@ def _conf_name(node) -> str:
     if node["country"]:
         label = f"{node['country']}-{label}"
     slug = re.sub(r"[^A-Za-z0-9_=+.-]+", "-", label).strip("-")
-    return slug[:15]  # WireGuard interface names are limited to 15 chars
+    return slug[:15] or f"vpn-{node['id']}"  # WireGuard tunnel names: max 15 chars, no spaces
+
+
+def tunnel_names(nodes) -> dict[int, str]:
+    """The name each location gets in the WireGuard app (the config's file name), unique per customer."""
+    names, used = {}, set()
+    for n in sorted(nodes, key=lambda n: n["id"]):
+        name = _conf_name(n)
+        if name in used:
+            name = f"{name[:15 - len(str(n['id'])) - 1]}-{n['id']}"
+        used.add(name)
+        names[n["id"]] = name
+    return names
+
+
+def tunnel_name(conn, node) -> str:
+    return tunnel_names(conn.execute("SELECT id, name, location, country FROM nodes WHERE enabled = 1").fetchall()
+                        ).get(node["id"]) or _conf_name(node)
+
+
+MOBILE_DEVICE_NAMES = {"ios": "iPhone", "android": "Android phone"}
+
+
+def mobile_os(request: Request) -> str:
+    ua = request.headers.get("user-agent", "")
+    return "ios" if re.search(r"iPhone|iPad|iPod", ua) else "android" if "Android" in ua else ""
 
 
 def _mark_downloaded(device_id: int, node_ids):
@@ -641,10 +671,11 @@ def _mark_downloaded(device_id: int, node_ids):
 def download_config(request: Request, node_id: int, device: int):
     user, dev, node = _device_node(request, node_id, device)
     _mark_downloaded(dev["id"], [node["id"]])
-    return PlainTextResponse(
-        crypto.client_config(dev, node, user["email"]),
-        headers={"Content-Disposition": f'attachment; filename="{_conf_name(node)}.conf"'},
-    )
+    with db.session() as conn:
+        name = tunnel_name(conn, node)
+    # the file name becomes the tunnel's name in WireGuard; octet-stream so phones keep the .conf extension
+    return Response(crypto.client_config(dev, node, user["email"]), media_type="application/octet-stream",
+                    headers={"Content-Disposition": f'attachment; filename="{name}.conf"'})
 
 
 @app.get("/portal/qr/{node_id}.svg")
@@ -665,14 +696,10 @@ def download_all(request: Request, device: int):
         dev = _own_device(conn, user, device)
         nodes = conn.execute("SELECT * FROM nodes WHERE enabled = 1").fetchall()
     buf = io.BytesIO()
+    names = tunnel_names(nodes)
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        used = set()
         for n in nodes:
-            name = _conf_name(n)
-            if name in used:
-                name = f"{name[:11]}-{n['id']}"[:15]
-            used.add(name)
-            zf.writestr(f"{name}.conf", crypto.client_config(dev, n, user["email"]))
+            zf.writestr(f"{names[n['id']]}.conf", crypto.client_config(dev, n, user["email"]))
     _mark_downloaded(dev["id"], [n["id"] for n in nodes])
     fname = re.sub(r"[^A-Za-z0-9_.-]+", "-", f"{BRAND}-{dev['name']}")
     return Response(buf.getvalue(), media_type="application/zip",
@@ -863,8 +890,9 @@ def _traffic_query(view: str, q: str, node: int, hours: int, group: bool):
         return f"SELECT * FROM sessions WHERE {where} ORDER BY last_seen DESC", params
     where = "last_seen >= ?"
     if q.strip():
-        where += " AND (user_email LIKE ? OR dst LIKE ? OR src LIKE ? OR device_name LIKE ? OR CAST(dport AS TEXT) = ?)"
-        params += [like] * 4 + [q.strip()]
+        where += (" AND (user_email LIKE ? OR dst LIKE ? OR src LIKE ? OR device_name LIKE ? OR host LIKE ?"
+                  " OR CAST(dport AS TEXT) = ?)")
+        params += [like] * 5 + [q.strip()]
     if node:
         where += " AND node_id = ?"
         params.append(node)
@@ -890,6 +918,44 @@ def admin_traffic(request: Request, view: str = "sessions", q: str = "", node: i
                   q=q, node=node, hours=hours, group=group, page=page, nodes=nodes, now_ts=time.time(),
                   log_sessions=monitoring.LOG_SESSIONS, log_destinations=monitoring.LOG_DESTINATIONS,
                   flow_days=monitoring.FLOW_LOG_DAYS, session_days=monitoring.SESSION_LOG_DAYS)
+
+
+INSIGHT_FILTERS = ("node", "device", "user", "category", "app", "country", "dest", "port", "q")
+
+
+def _insight_filters(request: Request) -> dict:
+    f = {k: request.query_params.get(k, "").strip()[:255] for k in INSIGHT_FILTERS}
+    for k in ("node", "device", "port"):
+        if f[k] and not f[k].isdigit():
+            f[k] = ""
+    return {k: v for k, v in f.items() if v}
+
+
+@app.get("/admin/insights", response_class=HTMLResponse)
+def admin_insights(request: Request):
+    require_admin(request)
+    with db.session() as conn:
+        nodes = conn.execute("SELECT id, name, country FROM nodes ORDER BY name").fetchall()
+        has_names = conn.execute("SELECT 1 FROM flow_log WHERE host != '' LIMIT 1").fetchone()
+        old_agents = [n["name"] for n in conn.execute("SELECT name, agent_version FROM nodes WHERE enabled = 1")
+                      if version_tuple(n["agent_version"]) < (0, 5, 0)]
+    return render(request, "insights.html", nodes=nodes, log_destinations=monitoring.LOG_DESTINATIONS,
+                  flow_days=monitoring.FLOW_LOG_DAYS, categories=apps.CATEGORIES, has_names=bool(has_names),
+                  old_agents=old_agents, geo_enabled=geo.ENABLED, flag_codes=sorted(countries.COUNTRIES))
+
+
+@app.get("/admin/insights/data.json")
+def admin_insights_data(request: Request, range: str = "24h"):
+    require_admin(request)
+    with db.session() as conn:
+        return insights.dashboard(conn, range if range in insights.RANGES else "24h", _insight_filters(request))
+
+
+@app.get("/admin/insights/live.json")
+def admin_insights_live(request: Request, after: int = 0):
+    require_admin(request)
+    with db.session() as conn:
+        return {"flows": insights.live(conn, _insight_filters(request), after)}
 
 
 @app.get("/admin/traffic.csv")
@@ -1337,9 +1403,11 @@ def agent_sync(request: Request, body: dict = Depends(json_body), authorization:
                                               int(p.get("rx") or 0), int(p.get("tx") or 0))
             if isinstance(body.get("metrics"), dict):
                 monitoring.record_metrics(conn, node["id"], body["metrics"])
+            by_ip = {crypto.device_ip(d, node): d for d in devices.values()}
             if isinstance(body.get("flows"), list):
-                monitoring.record_flows(conn, node, body["flows"],
-                                        {crypto.device_ip(d, node): d for d in devices.values()})
+                monitoring.record_flows(conn, node, body["flows"], by_ip)
+            if isinstance(body.get("dns"), list):
+                monitoring.record_dns(conn, node, body["dns"], by_ip)
     except Exception:
         log.exception("node %s: recording stats/logs failed (check-in still accepted)", node["id"])
 

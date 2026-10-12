@@ -14,7 +14,8 @@
   <div><h1 style="margin:0">Traffic log</h1>
     <span class="muted small">Where customers connect from and where their traffic goes.
       Kept {{ session_days }} days (connections) / {{ flow_days }} days (destinations).</span></div>
-  <a class="btn" href="/admin/traffic.csv{{ qs({}) }}">Export CSV</a>
+  <div class="toolbar"><a class="btn" href="/admin/insights">Insights dashboard</a>
+    <a class="btn" href="/admin/traffic.csv{{ qs({}) }}">Export CSV</a></div>
 </div>
 
 <div class="tabs" role="tablist">
@@ -72,7 +73,7 @@
   <tr><td class="muted">{{ f.first_seen|ts }}</td>
     <td>{% if f.user_email %}<a href="{{ qs({'q': f.user_email, 'page': 1}) }}">{{ f.user_email }}</a>{% else %}<span class="muted mono small">{{ f.src }}</span>{% endif %}</td>
     <td>{{ f.device_name }}</td><td>{{ f.node_name }}</td>
-    <td class="mono small"><a href="{{ qs({'q': f.dst, 'page': 1}) }}">{{ f.dst }}</a></td><td>{{ f.dport|port(f.proto) }}</td>
+    <td class="mono small"><a href="{{ qs({'q': f.dst, 'page': 1}) }}">{{ f.host or f.dst }}</a>{% if f.host %} <span class="muted">{{ f.dst }}</span>{% endif %}</td><td>{{ f.dport|port(f.proto) }}</td>
     <td>{{ f.conns }}</td><td>{{ f.bytes_out|bytes }}</td><td>{{ f.bytes_in|bytes }}</td></tr>
   {% else %}<tr><td colspan="9" class="muted">Nothing logged for these filters.</td></tr>{% endfor %}
   </tbody>
@@ -86,5 +87,5 @@
   {% if has_more %}<a class="btn sm" href="{{ qs({'page': page + 1}) }}">Older →</a>{% endif %}
 </div>
 {% endif %}
-<p class="muted small" style="margin-top:16px">Destinations are IP addresses (the server never sees which website names were looked up). Bytes are counted when a connection closes, so very new or long-lived connections may show 0 B until they end.</p>
+<p class="muted small" style="margin-top:16px">Website names appear when the device looked them up through the VPN's DNS. Bytes are counted when a connection closes, so very new or long-lived connections may show 0 B until they end.</p>
 {% endblock %}

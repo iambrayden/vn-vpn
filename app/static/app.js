@@ -203,6 +203,13 @@
       $('[data-k=dup-device]').textContent = pick.selectedOptions[0].textContent;
       $('#dup-config').showModal();
     }, true);
+    // On a phone, explain how to get the downloaded file into the WireGuard app
+    document.addEventListener('click', e => {
+      const a = e.target.closest('a[data-tunnel]'), help = $('#import-help');
+      if (!a || !help) return;
+      $$('[data-k=tunnel]', help).forEach(el => (el.textContent = a.dataset.tunnel));
+      setTimeout(() => help.showModal(), 600);
+    });
     $('#dup-continue')?.addEventListener('click', () => {
       $('#dup-config').close();
       if (!pendingConfig) return;

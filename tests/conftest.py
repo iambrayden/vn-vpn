@@ -7,6 +7,7 @@ os.environ["DATABASE_PATH"] = os.path.join(_tmp, "boot.db")
 os.environ["SECRET_KEY"] = "test-secret"
 os.environ["PROVISION_API_KEY"] = "test-api-key"
 os.environ.pop("STRIPE_SECRET_KEY", None)
+os.environ["GEO_LOOKUP"] = "false"  # no ip2asn download in tests (tests that need it switch it on)
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

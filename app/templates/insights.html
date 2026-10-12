@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Traffic insights · {{ brand }}{% endblock %}
+{% block page %}insights{% endblock %}
+
+{% block main %}<main class="wide">
+<a href="/admin" class="small">← Dashboard</a>
+<div class="section-head" style="margin-top:6px">
+  <div><h1 style="margin:0">Traffic insights</h1>
+    <span class="muted small">What's going over the VPN — apps, clients, destinations and live flows. Kept {{ flow_days }} days.</span></div>
+  <div class="toolbar">
+    <div class="seg" role="group" aria-label="Time range">
+      <button data-range="1h">1H</button><button data-range="24h">24H</button><button data-range="7d">7D</button>
+    </div>
+    <select id="ins-node" aria-label="Server" style="width:auto;margin:0">
+      <option value="">All servers</option>
+      {% for n in nodes %}<option value="{{ n.id }}">{{ n.name }}</option>{% endfor %}
+    </select>
+    <a class="btn" href="/admin/traffic?view=destinations">Raw log</a>
+  </div>
+</div>
+
+{% if not log_destinations %}
+<div class="card notice warn" style="margin-bottom:14px"><div>Destination logging is off (<code>LOG_DESTINATIONS=false</code>), so nothing new is recorded. Older data below is kept until it expires.</div></div>
+{% endif %}
+{% if old_agents %}
+<div class="card notice" style="margin-bottom:14px"><div>
+  <b>{{ old_agents|join(', ') }}</b> {{ 'is' if old_agents|length == 1 else 'are' }} on an older agent that doesn't report website names yet.
+  Servers update themselves on their next check-in — until then their traffic is identified by network owner only.
+</div></div>
+{% endif %}
+
+<div class="ins-filters">
+  <label class="search" style="margin:0"><span class="sr-only">Search</span>
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+    <input type="search" id="ins-q" placeholder="Search customer, device, website, IP…"></label>
+  <div id="ins-chips" class="chips"></div>
+  <span class="muted small" id="ins-updated"></span>
+</div>
+
+<div class="kpis" id="kpis">
+  {% for k, label in [('down', 'Downloaded'), ('up', 'Uploaded'), ('clients', 'Active clients'), ('conns', 'Connections'), ('dests', 'Destinations'), ('dns', 'DNS lookups'), ('top_app', 'Top app')] %}
+  <div class="card kpi"><div class="k">{{ label }}</div><div class="v" data-kpi="{{ k }}">—</div></div>
+  {% endfor %}
+</div>
+
+<div class="ins-grid top">
+  <figure class="card chart-card span-2">
+    <figcaption><h3>Bandwidth</h3><span class="muted small" id="tp-sub">all servers, network interface</span>
+      <span class="legend"><span><i class="swatch" style="background:var(--series-1)"></i>In</span><span><i class="swatch" style="background:var(--series-2)"></i>Out</span></span></figcaption>
+    <div class="chart" id="chart-tp" style="height:220px"></div>
+  </figure>
+  <section class="card">
+    <div class="card-title"><h3>Traffic by category</h3><span class="muted small" id="cat-total"></span></div>
+    <div class="stackbar" id="cat-bar" role="img"></div>
+    <ul class="catlist" id="cat-list"></ul>
+  </section>
+</div>
+
+<figure class="card chart-card" style="margin-top:16px">
+  <figcaption><h3>Activity by category</h3><span class="muted small">data per period, by when connections closed</span></figcaption>
+  <div class="chart" id="chart-cat" style="height:200px"></div>
+</figure>
+
+<div class="ins-grid">
+  <section class="card"><div class="card-title"><h3>Top apps</h3><span class="muted small">by data</span></div><ol class="barlist" id="list-apps"></ol></section>
+  <section class="card"><div class="card-title"><h3>Top clients</h3><span class="muted small">devices</span></div><ol class="barlist" id="list-clients"></ol></section>
+  <section class="card"><div class="card-title"><h3>Top destinations</h3><span class="muted small">websites &amp; IPs</span></div><ol class="barlist" id="list-dests"></ol></section>
+  <section class="card"><div class="card-title"><h3>Destination countries</h3>{% if not geo_enabled %}<span class="muted small">lookup off</span>{% endif %}</div><ol class="barlist" id="list-countries"></ol></section>
+  <section class="card"><div class="card-title"><h3>DNS lookups</h3><span class="muted small">most requested names</span></div><ol class="barlist" id="list-dns"></ol></section>
+  <section class="card"><div class="card-title"><h3>Ports &amp; protocols</h3><span class="muted small">by connections</span></div><ol class="barlist" id="list-ports"></ol></section>
+  <section class="card" id="servers-card"><div class="card-title"><h3>Servers</h3><span class="muted small">by data</span></div><ol class="barlist" id="list-servers"></ol></section>
+</div>
+
+<section class="card table-card" style="margin-top:16px">
+  <div class="card-title" style="padding:16px 18px 0">
+    <h3><span class="live-dot" id="live-dot"></span> Live flows</h3>
+    <span class="muted small">newest connections, refreshed every 5s</span>
+    <button class="btn sm" id="live-toggle" style="margin-left:auto">Pause</button>
+  </div>
+  <div class="table-wrap"><table class="flows">
+    <thead><tr><th>Time</th><th>Client</th><th>App</th><th>Destination</th><th class="hide-md">Country</th><th class="hide-md">Port</th><th>↓</th><th>↑</th></tr></thead>
+    <tbody id="live-body"><tr><td colspan="8" class="muted">Loading…</td></tr></tbody>
+  </table></div>
+</section>
+<p class="muted small" style="margin-top:14px">Website names come from the DNS lookups devices make through the tunnel; apps using encrypted DNS show the destination's network owner instead.
+  Bytes per connection are counted when it closes, so totals for long-lived connections arrive late — the bandwidth chart shows live server traffic.
+  {% if geo_enabled %}Countries and network owners: <a href="https://iptoasn.com" rel="noopener">iptoasn.com</a> (public domain).{% endif %}</p>
+</main>
+<script type="application/json" id="ins-config">{{ {'categories': categories, 'flags': flag_codes}|tojson }}</script>
+{% endblock %}
+
+{% block scripts %}<script src="/static/insights.js?v={{ asset_v['insights.js'] }}"></script>{% endblock %}

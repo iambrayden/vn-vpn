@@ -3,10 +3,11 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import time
 import urllib.request
 
-from . import db
+from . import apps, db, geo
 
 METRICS_DAYS = int(os.environ.get("METRICS_DAYS", "7"))
 SESSION_LOG_DAYS = int(os.environ.get("SESSION_LOG_DAYS", "30"))
@@ -61,15 +62,41 @@ def record_flows(conn, node, flows: list, devices_by_ip: dict):
     for f in flows[:20000]:
         d = devices_by_ip.get(f.get("src"))
         try:
+            dst, dport = str(f["dst"])[:45], int(f.get("dport", 0))
+            host = str(f.get("host") or "")[:253].lower()
+            country, org = geo.lookup(dst)
+            app, category = apps.classify(host, org, dport)
             rows.append((int(f["first"]), int(f["last"]), node["id"], d["id"] if d else None,
                          d["email"] if d else "", d["name"] if d else "", node["name"], str(f["src"])[:45],
-                         str(f["dst"])[:45], int(f.get("dport", 0)), str(f.get("proto", ""))[:10],
-                         int(f.get("conns", 0)), int(f.get("out", 0)), int(f.get("in", 0))))
+                         dst, dport, str(f.get("proto", ""))[:10],
+                         int(f.get("conns", 0)), int(f.get("out", 0)), int(f.get("in", 0)),
+                         host, app, category, country, org[:120]))
         except (KeyError, TypeError, ValueError):
             continue
     conn.executemany("""INSERT INTO flow_log (first_seen, last_seen, node_id, device_id, user_email, device_name,
-                        node_name, src, dst, dport, proto, conns, bytes_out, bytes_in)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+                        node_name, src, dst, dport, proto, conns, bytes_out, bytes_in, host, app, category,
+                        country, org) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+
+
+def record_dns(conn, node, lookups: list, devices_by_ip: dict):
+    """DNS names looked up through the tunnel, as counted by the agent since its last check-in."""
+    if not LOG_DESTINATIONS:
+        return
+    now, rows = int(time.time()), []
+    for q in lookups[:5000]:
+        try:
+            name = str(q["name"]).lower().rstrip(".")[:253]
+            count = int(q.get("count", 1))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not name or name.endswith((".arpa", ".local")):
+            continue
+        d = devices_by_ip.get(q.get("src"))
+        app, category = apps.classify(name)
+        rows.append((now, node["id"], d["id"] if d else None, d["email"] if d else "", d["name"] if d else "",
+                     name, app, category, count))
+    conn.executemany("""INSERT INTO dns_log (ts, node_id, device_id, user_email, device_name, name, app, category,
+                        count) VALUES (?,?,?,?,?,?,?,?,?)""", rows)
 
 
 # --------------------------------------------------------------------------- queries
@@ -113,6 +140,7 @@ def purge(conn):
     conn.execute("DELETE FROM node_metrics WHERE ts < ?", (now - METRICS_DAYS * 86400,))
     conn.execute("DELETE FROM sessions WHERE last_seen < ?", (now - SESSION_LOG_DAYS * 86400,))
     conn.execute("DELETE FROM flow_log WHERE last_seen < ?", (now - FLOW_LOG_DAYS * 86400,))
+    conn.execute("DELETE FROM dns_log WHERE ts < ?", (now - FLOW_LOG_DAYS * 86400,))
 
 
 def send_alert(text: str):
@@ -165,6 +193,8 @@ def _tick(node_online, do_purge: bool):
             purge(conn)
     for msg in messages:
         send_alert(msg)
+    if do_purge and LOG_DESTINATIONS:  # destination country/owner database, weekly, without holding up alerts
+        threading.Thread(target=geo.refresh_if_stale, daemon=True).start()
 
 
 async def background_loop(node_online):
