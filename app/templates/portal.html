@@ -76,8 +76,8 @@
 <section id="devices">
   <div class="section-head">
     <div><h2>Your devices</h2>
-      <span class="muted small">{{ limit }} connected at a time{% if plan %} on {{ plan.name }}{% endif %} · {{ devices|length }} of {{ max_devices }} devices added</span></div>
-    {% if devices|length < max_devices %}
+      <span class="muted small">Add as many as you like · {{ limit }} can be connected at a time{% if plan %} on {{ plan.name }}{% endif %}</span></div>
+    {% if not max_devices or devices|length < max_devices %}
     <button class="btn" data-open="add-device">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12h14"/></svg>
       Add device</button>
@@ -227,7 +227,11 @@
   <div class="dlg-head"><h2 class="cell-main"><span class="flag sm">{{ n.country|flag }}</span>{{ n.name }}</h2><button class="btn ghost icon" data-close aria-label="Close">✕</button></div>
   <div class="dlg-body" style="text-align:center">
     <p class="muted small" style="margin-top:14px">For <b data-k="device-name">{{ selected.name }}</b></p>
-    <div class="qr-box"><img data-device-src="/portal/qr/{{ n.id }}.svg" data-src="/portal/qr/{{ n.id }}.svg?device={{ selected.id }}" alt="QR code for {{ n.name }}"></div>
+    <div class="qr-box">
+      <img loading="lazy" data-device-src="/portal/qr/{{ n.id }}.svg" src="/portal/qr/{{ n.id }}.svg?device={{ selected.id }}" alt="QR code for {{ n.name }}"
+           onerror="this.classList.add('failed'); this.nextElementSibling.hidden = false">
+      <div class="qr-error" hidden>Couldn't load the QR code. Refresh the page, or use <a data-device-href="/portal/config/{{ n.id }}.conf" href="/portal/config/{{ n.id }}.conf?device={{ selected.id }}">Download</a> instead.</div>
+    </div>
     <p class="muted small">In WireGuard on your phone, tap <b>+</b> → <b>Scan from QR code</b>.<br>Keep this code private — it's your personal key.</p>
   </div>
 </dialog>
@@ -238,7 +242,7 @@
     <div class="dlg-head"><h2>Add a device</h2><button type="button" class="btn ghost icon" data-close aria-label="Close">✕</button></div>
     <div class="dlg-body">
       <p class="muted small" style="margin-top:14px">Each device gets its own key, so you can remove one (if it's lost) without touching the others.
-        You can add up to {{ max_devices }}; {{ limit }} can be connected at the same time.</p>
+        Add as many devices as you like; {{ limit }} can be connected at the same time.</p>
       <label>Device name <input name="name" id="device-name" maxlength="40" placeholder="e.g. Sam's iPhone" required></label>
     </div>
     <div class="dlg-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Add device</button></div>

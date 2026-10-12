@@ -184,14 +184,17 @@ details.setup[open] > summary .chev { transform: rotate(180deg); }
 .server-actions .btn:first-child { flex: 1; }
 .traffic { font-size: 13px; color: var(--ok); }
 .qr-box { background: #fff; border-radius: 12px; padding: 12px; display: grid; place-items: center; margin: 14px auto 6px; width: fit-content; }
-.qr-box img { width: min(300px, 70vw); height: auto; display: block; }
+.qr-box img { width: min(300px, 70vw); height: auto; aspect-ratio: 1; display: block; }
+.qr-box img.failed { display: none; }
+.qr-error { color: #475569; font-size: 14px; padding: 24px 12px; max-width: 280px; }
 .empty { text-align: center; padding: 48px 20px; color: var(--muted); }
 .empty .big { font-size: 40px; margin-bottom: 8px; }
 
 /* ---------- admin */
-.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 22px; overflow-x: auto; }
+.tabs { display: flex; gap: 4px; box-shadow: inset 0 -1px var(--line); margin-bottom: 22px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
 .tabs button { font: inherit; font-weight: 600; color: var(--muted); background: none; border: 0; padding: 10px 14px; cursor: pointer;
-  border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; display: flex; gap: 8px; align-items: center; }
+  border-bottom: 2px solid transparent; white-space: nowrap; display: flex; gap: 8px; align-items: center; }
 .tabs button:hover { color: var(--text); }
 .tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
 .count { background: var(--card-2); border: 1px solid var(--line); color: var(--muted); font-size: 12px; padding: 0 7px; border-radius: 99px; }

@@ -51,7 +51,7 @@ Without Coolify: `docker build -t vnvpn . && docker run -p 8000:8000 -v vnvpn:/d
 3. Stripe → **Settings → Billing → Customer portal**: turn it on (lets customers update cards, see invoices and cancel).
 4. In Coolify set `STRIPE_SECRET_KEY` (`sk_live_…` or `sk_test_…`), `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_BASIC`, `STRIPE_PRICE_PRO`, and redeploy. Prices shown on the pricing page are read from Stripe.
 
-Use test mode keys and card `4242 4242 4242 4242` to try it end to end. Optional: `PLAN_BASIC_DEVICES` / `PLAN_PRO_DEVICES` (default 1 / 5), `PLAN_BASIC_NAME` / `PLAN_PRO_NAME`, `MAX_DEVICES` (devices a customer may add, default 10).
+Use test mode keys and card `4242 4242 4242 4242` to try it end to end. Optional: `PLAN_BASIC_DEVICES` / `PLAN_PRO_DEVICES` (default 1 / 5), `PLAN_BASIC_NAME` / `PLAN_PRO_NAME`, `MAX_DEVICES` (cap on devices a customer may add; default unlimited — only simultaneous connections are limited).
 
 Customers with a failing card (`past_due`) keep access while Stripe retries; `unpaid`/`canceled` lose it. Admins can give anyone a plan for free from **Admin → Users → ••• → Give Basic/Pro free** (or `PUT /api/v1/users/{email}/plan`).
 

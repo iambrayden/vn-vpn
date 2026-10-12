@@ -7,7 +7,7 @@ import stripe
 
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
-MAX_DEVICES = int(os.environ.get("MAX_DEVICES", "10"))  # devices a user may register (not connect at once)
+MAX_DEVICES = int(os.environ.get("MAX_DEVICES", "0"))  # devices a user may add (0 = unlimited); not a connection limit
 
 # Plan key -> settings. "devices" = how many devices may be connected at the same time.
 PLANS = {

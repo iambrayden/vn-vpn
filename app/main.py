@@ -1,4 +1,5 @@
 """VN-VPN management panel: client portal, admin console, provisioning API and agent API."""
+import hashlib
 import io
 import ipaddress
 import os
@@ -88,6 +89,14 @@ templates.env.filters["ago"] = ago
 templates.env.filters["flag"] = countries.flag
 templates.env.globals["countries"] = countries.COUNTRIES
 templates.env.globals["plans"] = billing.PLANS
+
+
+def _asset_version(name: str) -> str:
+    """Content hash for cache-busting, so a deploy never leaves browsers on a stale app.js / style.css."""
+    return hashlib.sha256((BASE / "static" / name).read_bytes()).hexdigest()[:10]
+
+
+templates.env.globals["asset_v"] = {n: _asset_version(n) for n in ("app.js", "style.css")}
 
 
 # --------------------------------------------------------------------------- helpers
@@ -416,7 +425,7 @@ def portal_add_device(request: Request, name: str = Form("")):
     user = require_access(request)
     with db.session() as conn:
         count = conn.execute("SELECT COUNT(*) FROM devices WHERE user_id = ?", (user["id"],)).fetchone()[0]
-        if count >= billing.MAX_DEVICES:
+        if billing.MAX_DEVICES and count >= billing.MAX_DEVICES:
             flash(request, f"You can have up to {billing.MAX_DEVICES} devices. Remove one you no longer use.", "error")
             return RedirectResponse("/portal#devices", status_code=303)
         device_id = add_device(conn, user, name)

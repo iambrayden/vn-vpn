@@ -64,3 +64,28 @@ def test_agent_server_config_forwards_and_clamps(monkeypatch):
     assert "iptables -I FORWARD -i wg0 -j ACCEPT" in out
     assert "--clamp-mss-to-pmtu" in out and "net.ipv4.ip_forward=1" in out
     assert "iptables -t nat -D POSTROUTING -s 10.66.0.0/16 -o eth0 -j MASQUERADE" in out  # PostDown mirrors PostUp
+
+
+def test_qr_code_renders_for_device(client):
+    add_node(client)
+    signup(client)
+    grant("cust@example.com", "pro")
+    page = client.get("/portal").text
+    dev = devices_of("cust@example.com")[0]
+    assert f'src="/portal/qr/1.svg?device={dev["id"]}"' in page  # works without JavaScript
+    r = client.get(f"/portal/qr/1.svg?device={dev['id']}")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/svg+xml" and b"<svg" in r.content
+
+
+def test_devices_are_unlimited_by_default(client):
+    signup(client)
+    grant("cust@example.com", "basic")
+    client.get("/portal")
+    for i in range(15):
+        client.post("/portal/devices", data={"name": f"D{i}"})
+    assert len(devices_of("cust@example.com")) == 16
+
+
+def test_static_assets_are_cache_busted_by_content(client):
+    page = client.get("/login").text
+    assert f"/static/app.js?v={main.templates.env.globals['asset_v']['app.js']}" in page

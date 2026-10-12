@@ -140,8 +140,8 @@
       const id = pick.value, name = pick.selectedOptions[0]?.textContent || '';
       $$('[data-device-href]').forEach(a => (a.href = `${a.dataset.deviceHref}?device=${id}`));
       $$('[data-device-src]').forEach(img => {
-        img.dataset.src = `${img.dataset.deviceSrc}?device=${id}`;
-        if (img.getAttribute('src')) img.src = img.dataset.src;
+        const src = `${img.dataset.deviceSrc}?device=${id}`;
+        if (img.getAttribute('src') !== src) { img.classList.remove('failed'); img.nextElementSibling.hidden = true; img.src = src; }
       });
       $$('[data-k=device-name]').forEach(el => (el.textContent = name));
     };
@@ -150,12 +150,6 @@
       const u = new URL(location.href); u.searchParams.set('device', pick.value); history.replaceState(null, '', u);
     });
     applyDevice();
-    // QR codes load only when their dialog opens (and reload after switching device)
-    document.addEventListener('click', e => {
-      const b = e.target.closest('[data-open^="qr-"]');
-      const img = b && $(`#${b.dataset.open} img[data-src]`);
-      if (img && img.getAttribute('src') !== img.dataset.src) img.src = img.dataset.src;
-    });
     // Suggest a device name from the browser
     const nameInput = $('#device-name');
     if (nameInput) nameInput.value = { ios: 'iPhone', android: 'Android phone', windows: 'Windows PC', macos: 'Mac', linux: 'Linux PC' }[os] || '';
