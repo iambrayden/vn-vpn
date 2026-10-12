@@ -35,7 +35,7 @@
       {% if nodes %}
       <ul class="list">
         {% for n in nodes %}
-        <li><span class="flag" style="font-size:20px;width:26px">{{ n.country|flag }}</span>
+        <li><span class="flag sm">{{ n.country|flag }}</span>
           <span class="grow"><b>{{ n.name }}</b> <span class="muted small">{{ n.location }}</span></span>
           <span class="muted small"><span data-node-active="{{ n.id }}">{{ n.active_peers }}</span> online</span>
           {{ node_status(n) }}</li>
@@ -174,7 +174,7 @@
           <label>City / region <input id="wiz-location" placeholder="Frankfurt"></label>
           <label>Country
             <select id="wiz-country"><option value="">Choose…</option>
-              {% for code, name in countries|dictsort(by='value') %}<option value="{{ code }}">{{ code|flag }} {{ name }}</option>{% endfor %}
+              {% for code, name in countries|dictsort(by='value') %}<option value="{{ code }}">{{ name }}</option>{% endfor %}
             </select></label>
         </div>
         <label>Enrollment token
@@ -221,7 +221,7 @@
         <label>City / region <input name="location" value="{{ n.location }}"></label>
         <label>Country
           <select name="country"><option value="">—</option>
-            {% for code, name in countries|dictsort(by='value') %}<option value="{{ code }}" {{ 'selected' if code == n.country }}>{{ code|flag }} {{ name }}</option>{% endfor %}
+            {% for code, name in countries|dictsort(by='value') %}<option value="{{ code }}" {{ 'selected' if code == n.country }}>{{ name }}</option>{% endfor %}
           </select></label>
       </div>
       <label>Public endpoint <span class="hint">· IP or hostname clients connect to</span><input name="endpoint_host" value="{{ n.endpoint_host }}" required></label>

@@ -167,7 +167,10 @@ details.setup[open] > summary .chev { transform: rotate(180deg); }
 .server.is-connected { border-color: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
 .server.is-offline { opacity: .65; }
 .server-top { display: flex; gap: 12px; align-items: center; }
-.flag { font-size: 30px; line-height: 1; width: 40px; text-align: center; flex: none; }
+.flag { width: 40px; flex: none; display: grid; place-items: center; }
+.flag-img { width: 100%; height: auto; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 4px; box-shadow: 0 0 0 1px rgb(0 0 0 / .08); display: block; }
+.flag-img.flag-none { box-shadow: none; color: var(--muted); }
+.flag.sm { width: 26px; }
 .server-name { font-weight: 650; font-size: 16px; }
 .server-sub { font-size: 13px; color: var(--muted); }
 .server-badges { margin-left: auto; align-self: flex-start; }
@@ -211,7 +214,7 @@ th { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: v
 td.actions { text-align: right; }
 td form { display: inline; }
 .cell-main { display: flex; align-items: center; gap: 10px; }
-.cell-main .flag { font-size: 22px; width: 28px; }
+.cell-main .flag { width: 28px; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; }
 .chip { font: inherit; font-size: 13px; font-weight: 600; padding: 6px 12px; border-radius: 99px; border: 1px solid var(--line); background: var(--card); color: var(--muted); cursor: pointer; }
 .chip.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }

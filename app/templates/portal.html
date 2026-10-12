@@ -151,7 +151,7 @@
 {% if user.status == 'active' %}
 {% for n in nodes %}
 <dialog id="qr-{{ n.id }}">
-  <div class="dlg-head"><h2>{{ n.country|flag }} {{ n.name }}</h2><button class="btn ghost icon" data-close aria-label="Close">✕</button></div>
+  <div class="dlg-head"><h2 class="cell-main"><span class="flag sm">{{ n.country|flag }}</span>{{ n.name }}</h2><button class="btn ghost icon" data-close aria-label="Close">✕</button></div>
   <div class="dlg-body" style="text-align:center">
     <div class="qr-box"><img loading="lazy" src="/portal/qr/{{ n.id }}.svg" alt="QR code for {{ n.name }}"></div>
     <p class="muted small">In WireGuard on your phone, tap <b>+</b> → <b>Scan from QR code</b>.<br>Keep this code private — it's your personal key.</p>

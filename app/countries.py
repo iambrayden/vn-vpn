@@ -1,4 +1,5 @@
 """Country codes for server locations (flags in the UI)."""
+from markupsafe import Markup
 
 COUNTRIES = {
     "AE": "United Arab Emirates", "AR": "Argentina", "AT": "Austria", "AU": "Australia", "BE": "Belgium",
@@ -26,8 +27,15 @@ def normalize(value: str | None) -> str:
     return _BY_NAME.get(v.lower(), "")
 
 
-def flag(code: str | None) -> str:
+GLOBE_SVG = ('<svg class="flag-img flag-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">'
+             '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9'
+             's1.3-6.4 3.8-9z"/></svg>')
+
+
+def flag(code: str | None) -> Markup:
+    """Flag image for an ISO code (bundled SVGs - Windows can't render flag emoji); a globe if unknown."""
     code = (code or "").upper()
-    if len(code) != 2 or not code.isalpha():
-        return "🌐"
-    return "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in code)
+    if code not in COUNTRIES:
+        return Markup(GLOBE_SVG)
+    return Markup(f'<img class="flag-img" src="/static/flags/{code.lower()}.svg" alt="{COUNTRIES[code]}" '
+                  f'title="{COUNTRIES[code]}" width="32" height="24">')
